@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { login as apiLogin } from '../lib/pocketbase'
+import { login as apiLogin, saveToken } from '../lib/pocketbase'
 
 // Tokyo-style CSS lives in src/App.css
 
@@ -15,6 +15,7 @@ export default function Login({ onLogin }) {
     setLoading(true)
     try {
       const data = await apiLogin(email, password)
+      saveToken(data.token)
       onLogin(data.record, data.token)
     } catch (err) {
       setError('Invalid credentials. Try again.')
