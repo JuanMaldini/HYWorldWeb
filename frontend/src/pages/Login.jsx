@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { login as apiLogin } from '../lib/pocketbase'
-import './Login.css'
+
+// Tokyo-style CSS lives in src/App.css
 
 export default function Login({ onLogin }) {
   const [email, setEmail] = useState('')
