@@ -2,46 +2,33 @@
 title HYWorld Web
 cd /d D:\GitHub\HYWorldWeb
 
-:: Launch Flask in background
-echo Starting Flask server on port 5000...
-start /b D:\Apps\miniconda3\envs\hyworld2\python.exe server.py > flask.log 2>&1
+:: Kill any existing processes on ports 5000 and 5173
+echo Cleaning up ports...
+for /f "tokens=5" %%a in ('netstat -ano ^| findstr :5173 ^| findstr LISTENING') do taskkill /PID %%a /F >nul 2>&1
+for /f "tokens=5" %%a in ('netstat -ano ^| findstr :5000 ^| findstr LISTENING') do taskkill /PID %%a /F >nul 2>&1
+timeout /t 2 >nul
 
-:: Wait for Flask to be ready
-echo Waiting for Flask...
-for /L %%i in (1,1,30) do (
-    curl -s http://localhost:5000 >nul 2>&1 && goto :flask_ready
-    timeout /t 1 >nul
-)
-echo Flask did not start. Check flask.log
-goto :vite_start
-
-:flask_ready
-echo Flask ready.
-
-:vite_start
-:: Launch Vite dev server in background
-echo Starting React dev server on port 5173...
-cd frontend
-start /b npm run dev > vite.log 2>&1
+:: Launch React/Vite dev server with pnpm
+echo Starting pnpm dev server on port 5173...
+start /b cmd /c "cd frontend && pnpm run dev > vite.log 2>&1"
 
 :: Wait for Vite
-echo Waiting for Vite...
-for /L %%i in (1,1,30) do (
-    curl -s http://localhost:5173 >nul 2>&1 && goto :vite_ready
+echo Waiting for Vite to be ready...
+for /L %%i in (1,1,60) do (
+    curl -s http://localhost:5173 >nul 2>&1 && goto :ready
     timeout /t 1 >nul
+    echo Waiting... %%i/60
 )
-echo Vite ready.
 
-:vite_ready
+:ready
 echo.
 echo ====================================
 echo  HYWorld is running!
 echo  Web UI:   http://localhost:5173
-echo  API:      http://localhost:5000
-echo  Logs:     flask.log, vite.log
-echo  Press Ctrl+C here to stop all
+echo.
+echo  Logs: vite.log
+echo  Press Ctrl+C here to stop
 echo ====================================
 echo.
 
-:: Keep this process alive so Ctrl+C stops everything
 pause
