@@ -1,7 +1,5 @@
 import { useState } from 'react'
-import { login as apiLogin, saveToken } from '../lib/pocketbase'
-
-// Tokyo-style CSS lives in src/App.css
+import { pb } from '../lib/pocketbase'
 
 export default function Login({ onLogin }) {
   const [email, setEmail] = useState('')
@@ -14,9 +12,8 @@ export default function Login({ onLogin }) {
     setError('')
     setLoading(true)
     try {
-      const data = await apiLogin(email, password)
-      saveToken(data.token)
-      onLogin(data.record, data.token)
+      const authData = await pb.collection('hyworld_user').authWithPassword(email, password)
+      onLogin(authData.record, authData.token)
     } catch (err) {
       setError('Invalid credentials. Try again.')
     } finally {
