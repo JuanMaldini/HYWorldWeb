@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { api } from '../lib/pocketbase'
-import './App.css'
+import '../App.css'
 
 export default function Dashboard({ user, onLogout }) {
   const [projects, setProjects] = useState([])
