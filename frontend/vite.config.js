@@ -11,5 +11,6 @@ export default defineConfig({
       '/projects': 'http://localhost:5000',
       '/static': 'http://localhost:5000',
     }
-  }
+  },
+  historyApiFallback: true
 })
