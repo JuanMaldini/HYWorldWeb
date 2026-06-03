@@ -3,7 +3,7 @@ import { useParams, Link } from 'react-router-dom'
 import { api } from '../lib/pocketbase'
 import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
-import './App.css'
+import '../App.css'
 
 export default function Viewer() {
   const { pid } = useParams()
