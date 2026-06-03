@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>HYWorld - Dashboard</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #0a0a0f;
+    color: #e0e0e0;
+    font-family: 'Segoe UI', system-ui, sans-serif;
+    min-height: 100vh;
+  }
+  .topbar {
+    background: #12121a;
+    border-bottom: 1px solid #1e1e2e;
+    padding: 0 32px;
+    height: 60px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .logo { font-size: 20px; font-weight: 700; color: #7c3aed; }
+  .logo span { color: #a78bfa; }
+  .user { color: #666; font-size: 13px; }
+  .user a { color: #7c3aed; text-decoration: none; margin-left: 16px; }
+  
+  .container { max-width: 1200px; margin: 0 auto; padding: 40px 32px; }
+  
+  .header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 32px; }
+  h1 { font-size: 24px; font-weight: 600; }
+  
+  .btn {
+    background: #7c3aed;
+    color: #fff;
+    border: none;
+    border-radius: 8px;
+    padding: 10px 20px;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.2s;
+    text-decoration: none;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .btn:hover { background: #6d28d9; }
+  .btn-outline {
+    background: transparent;
+    border: 1px solid #2a2a3a;
+    color: #888;
+  }
+  .btn-outline:hover { border-color: #7c3aed; color: #7c3aed; }
+  
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 20px;
+  }
+  
+  .project-card {
+    background: #12121a;
+    border: 1px solid #1e1e2e;
+    border-radius: 12px;
+    overflow: hidden;
+    transition: border-color 0.2s, transform 0.2s;
+    cursor: pointer;
+  }
+  .project-card:hover { border-color: #7c3aed50; transform: translateY(-2px); }
+  
+  .thumb {
+    width: 100%;
+    height: 160px;
+    object-fit: cover;
+    background: #1a1a24;
+    display: block;
+  }
+  .thumb-placeholder {
+    width: 100%;
+    height: 160px;
+    background: linear-gradient(135deg, #1a1a24 0%, #12121a 100%);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 40px;
+    color: #333;
+  }
+  
+  .card-body { padding: 20px; }
+  .card-name { font-size: 15px; font-weight: 600; margin-bottom: 8px; }
+  
+  .meta {
+    display: flex;
+    gap: 16px;
+    font-size: 12px;
+    color: #555;
+  }
+  
+  .status {
+    display: inline-block;
+    padding: 3px 10px;
+    border-radius: 20px;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+  .status-pending { background: #1a1a24; color: #666; border: 1px solid #2a2a3a; }
+  .status-processing { background: #1a1500; color: #ca8a04; border: 1px solid #3a2a00; }
+  .status-completed { background: #0a1a0a; color: #22c55e; border: 1px solid #0a2a1a; }
+  
+  /* Modal */
+  .modal-overlay {
+    position: fixed; inset: 0;
+    background: rgba(0,0,0,0.7);
+    display: none;
+    align-items: center;
+    justify-content: center;
+    z-index: 100;
+  }
+  .modal-overlay.active { display: flex; }
+  .modal {
+    background: #12121a;
+    border: 1px solid #2a2a3a;
+    border-radius: 12px;
+    padding: 32px;
+    width: 480px;
+    max-width: 90vw;
+  }
+  .modal h2 { font-size: 18px; margin-bottom: 20px; }
+  .modal input {
+    width: 100%;
+    background: #1a1a24;
+    border: 1px solid #2a2a3a;
+    border-radius: 8px;
+    padding: 12px 16px;
+    color: #fff;
+    font-size: 14px;
+    outline: none;
+    margin-bottom: 16px;
+  }
+  .modal input:focus { border-color: #7c3aed; }
+  .modal-actions { display: flex; gap: 12px; justify-content: flex-end; }
+  .modal .btn-cancel {
+    background: transparent;
+    border: 1px solid #2a2a3a;
+    color: #666;
+    border-radius: 8px;
+    padding: 10px 20px;
+    cursor: pointer;
+  }
+  .modal .btn-cancel:hover { color: #fff; }
+  
+  /* empty state */
+  .empty {
+    text-align: center;
+    padding: 80px 20px;
+    color: #444;
+  }
+  .empty-icon { font-size: 48px; margin-bottom: 16px; }
+  .empty h2 { font-size: 18px; color: #555; margin-bottom: 8px; }
+  .empty p { font-size: 14px; }
+</style>
+</head>
+<body>
+<div class="topbar">
+  <div class="logo">HY<span>World</span></div>
+  <div class="user">
+    {{ user.email }}
+    <a href="/logout">Logout</a>
+  </div>
+</div>
+
+<div class="container">
+  <div class="header">
+    <h1>Projects</h1>
+    <button class="btn" onclick="openNewModal()">+ New Project</button>
+  </div>
+  
+  <div class="grid" id="projectGrid">
+    {% for p in projects %}
+    <div class="project-card" onclick="location.href='/project/{{ p.id }}'">
+      {% if p.image %}
+      <img class="thumb" src="{{ p.image }}" alt="{{ p.name }}">
+      {% else %}
+      <div class="thumb-placeholder">🏗</div>
+      {% endif %}
+      <div class="card-body">
+        <div class="card-name">{{ p.name }}</div>
+        <div class="meta">
+          <span class="status status-{{ p.status }}">{{ p.status }}</span>
+          <span>{{ p.input_count }} images</span>
+        </div>
+      </div>
+    </div>
+    {% else %}
+    <div class="empty" style="grid-column: 1/-1">
+      <div class="empty-icon">📁</div>
+      <h2>No projects yet</h2>
+      <p>Create your first project to start reconstructing 3D worlds.</p>
+    </div>
+    {% endfor %}
+  </div>
+</div>
+
+<!-- New Project Modal -->
+<div class="modal-overlay" id="newModal">
+  <div class="modal">
+    <h2>New Project</h2>
+    <input type="text" id="projectName" placeholder="Project name..." onkeydown="if(event.key==='Enter')createProject()">
+    <div class="modal-actions">
+      <button class="btn-cancel" onclick="closeNewModal()">Cancel</button>
+      <button class="btn" onclick="createProject()">Create</button>
+    </div>
+  </div>
+</div>
+
+<script>
+function openNewModal() {
+  document.getElementById('newModal').classList.add('active');
+  document.getElementById('projectName').focus();
+}
+function closeNewModal() {
+  document.getElementById('newModal').classList.remove('active');
+  document.getElementById('projectName').value = '';
+}
+async function createProject() {
+  const name = document.getElementById('projectName').value.trim();
+  if (!name) return;
+  const r = await fetch('/project/new', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+    body: 'name=' + encodeURIComponent(name)
+  });
+  const data = await r.json();
+  if (data.id) {
+    closeNewModal();
+    location.href = '/project/' + data.id;
+  }
+}
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') closeNewModal();
+});
+</script>
+</body>
+</html>
