@@ -325,6 +325,35 @@ def ensure_dir(path):
     os.makedirs(os.path.dirname(path), exist_ok=True)
 
 
+def prepare_front_view(slug, orig_filename):
+    """Modo 'solo frente': copia la imagen de entrada como vista unica en views/.
+    Devuelve la lista [view_path] o None si falla. Esto permite que run_ml()
+    (que siempre lee de projects/<slug>/views) funcione sin panorama."""
+    input_file = input_path_for_slug(slug, orig_filename)
+    if not os.path.exists(input_file) or os.path.getsize(input_file) == 0:
+        log.error("  [%s] front: input no existe %s" % (slug, input_file))
+        return None
+    base_name = os.path.splitext(orig_filename)[0]
+    view_path = view_path_for_slug(slug, base_name, 0)
+    ensure_dir(view_path)
+    # Limpiar vistas previas (evita mezclar con un 360 anterior)
+    views_dir = os.path.dirname(view_path)
+    for old in glob.glob(os.path.join(views_dir, "*.png")) + glob.glob(os.path.join(views_dir, "*.jpg")):
+        try:
+            os.remove(old)
+        except Exception:
+            pass
+    try:
+        from PIL import Image
+        img = Image.open(input_file).convert("RGB")
+        img.save(view_path, "PNG")
+        log.info("  [%s] front: vista unica -> %s" % (slug, view_path))
+        return [view_path]
+    except Exception as e:
+        log.error("  [%s] front: no se pudo preparar vista: %s" % (slug, e))
+        return None
+
+
 # ─────────────────────────────────────────────────────────────────────
 # HY-Pano 2.0 — single image → 360° panorama
 # ─────────────────────────────────────────────────────────────────────
@@ -899,33 +928,38 @@ def process(rec):
     log.info("  [%s] Iniciando pipeline completo (HY-Pano → WorldMirror)..." % slug)
     set_status(rid, "processing")
 
-    # ── Step 1: HY-Pano 2.0 → panorama ────────────────────────────────
-    # If pano generation fails, we'll fall back to using original image directly
-    pano_path = generate_panorama(slug, orig_filename)
+    # ── Modo de generacion: full_360 (default False) ─────────────────
+    # full_360 = True  -> HY-Pano 360 + multiview (9 vistas) + GLB completo
+    # full_360 = False -> solo imagen de frente (GLB rapido del frente)
+    settings = rec.get("settings") or {}
+    full_360 = bool(settings.get("full_360", False))
+    log.info("  [%s] modo generacion: %s" % (slug, "360 COMPLETO" if full_360 else "SOLO FRENTE"))
 
-    if pano_path and os.path.exists(pano_path) and os.path.getsize(pano_path) > 0:
-        # ── Step 2: extract multiview from panorama ──────────────────
-        view_paths = extract_multiview_from_panorama(slug, orig_filename, n_views=9)
+    view_paths = None
+    if full_360:
+        # ── Step 1: HY-Pano 2.0 → panorama ────────────────────────────
+        pano_path = generate_panorama(slug, orig_filename)
+        if pano_path and os.path.exists(pano_path) and os.path.getsize(pano_path) > 0:
+            # ── Step 2: extract multiview from panorama ──────────────
+            view_paths = extract_multiview_from_panorama(slug, orig_filename, n_views=9)
+            if not view_paths:
+                log.warning("  [%s] multiview falló — usando solo frente" % slug)
+        else:
+            log.warning("  [%s] HY-Pano no generó panorama — usando solo frente" % slug)
+
+    # ── Front-only: preparar imagen de frente como vista unica ────────
+    # Se usa cuando full_360=False, o como fallback si el 360 falló.
+    if not view_paths:
+        view_paths = prepare_front_view(slug, orig_filename)
         if not view_paths:
-            log.warning("  [%s] multiview falló — usando original como fallback" % slug)
-            # Fall through to single-image path
-            view_paths = None
-    else:
-        log.warning("  [%s] HY-Pano no generó panorama — usando imagen original" % slug)
-        view_paths = None
+            log.error("  [%s] no se pudo preparar entrada para WorldMirror" % slug)
+            set_status(rid, "error")
+            return
 
-    # ── Step 3: WorldMirror 2.0 ─────────────────────────────────────────
-    # If multiview was extracted, we use views/ for reconstruction
-    # Otherwise we use original input directly (single-image path)
+    # ── Step 3: WorldMirror 2.0 (siempre lee de projects/<slug>/views) ─
     output_dir = None
     try:
-        if view_paths:
-            # Multiview path: point views_dir at our extracted views
-            views_dir = os.path.join(PROJECTS_DIR, slug, "views")
-            output_dir = run_ml(slug, rec.get("settings"), want_mesh=True)
-        else:
-            # Single-image fallback: use input directly
-            output_dir = run_ml(slug, rec.get("settings"), want_mesh=True)
+        output_dir = run_ml(slug, settings, want_mesh=True)
     except Exception as e:
         log.error("  [%s] ML FALLO: %s\n%s" % (slug, e, traceback.format_exc()))
         set_status(rid, "error")
