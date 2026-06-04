@@ -17,98 +17,115 @@ export const isAuthenticated = () => pb.authStore.isValid
 
 export const getUser = () => pb.authStore.model
 
-// Generate slug: name-abc1
 function generateSlug(name) {
   const clean = name.toLowerCase().trim().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '')
   const rand = Math.random().toString(36).substring(2, 6)
   return `${clean}_${rand}`
 }
 
-// Save token on login
 export const saveToken = (token) => localStorage.setItem('pb_token', token)
 export const getToken = () => localStorage.getItem('pb_token') || ''
 
-// PB direct calls
 async function pbFetch(path, opts = {}) {
+  const base = PB_URL
   const token = getToken()
-  const base = import.meta.env.VITE_PB_URL || import.meta.env.VITE_PB_URL_LOCAL || ''
-  const res = await fetch(`${base}${path}`, {
-    ...opts,
-    headers: {
-      ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
-      ...(opts.body && !(opts.body instanceof FormData) ? { 'Content-Type': 'application/json' } : {}),
-      ...opts.headers,
-    },
-  })
-  if (!res.ok) throw new Error(await res.text())
-  return res.json()
+  const headers = {}
+  if (token) headers['Authorization'] = `Bearer ${token}`
+  if (opts.body && !(opts.body instanceof FormData)) {
+    headers['Content-Type'] = 'application/json'
+  }
+  const res = await fetch(`${base}${path}`, { ...opts, headers })
+  const text = await res.text()
+  if (!res.ok) throw new Error(`PB Error ${res.status}: ${text}`)
+  if (!text) return null
+  try { return JSON.parse(text) } catch { return text }
 }
 
 export const api = {
-  // List all projects
   async getProjects() {
     const data = await pbFetch('/api/collections/hyworld_data/records?sort=-created&perPage=100')
-    return data.items.map(item => ({
-      id: item.id,
-      slug: JSON.parse(item.json || '{}').slug || item.id,
-      name: JSON.parse(item.json || '{}').name || item.id,
-      status: JSON.parse(item.json || '{}').status || 'pending',
-      created: item.created,
-      thumb: item.files?.length > 0 ? `${import.meta.env.VITE_PB_URL || import.meta.env.VITE_PB_URL_LOCAL}/api/files/hyworld_data/${item.id}/${item.files[0]}` : '',
-    }))
+    if (!data?.items) return []
+    return data.items.map(item => {
+      let parsed = {}
+      try { parsed = typeof item.json === 'string' ? JSON.parse(item.json) : item.json } catch {}
+      const thumb = item.files?.length > 0
+        ? `${PB_URL}/api/files/hyworld_data/${item.id}/${item.files[0]}`
+        : ''
+      return {
+        id: item.id,
+        slug: parsed.slug || item.id,
+        name: parsed.name || item.id,
+        status: parsed.status || 'pending',
+        listo: parsed.listo || false,
+        created: item.created,
+        thumb,
+        files: (item.files || []).map(f => `${PB_URL}/api/files/hyworld_data/${item.id}/${f}`),
+      }
+    })
   },
 
-  // Create project (name + images required)
   async createProject(name, files) {
     const slug = generateSlug(name)
-    const jsonData = JSON.stringify({ name, slug, status: 'pending', created: new Date().toISOString() })
-
-    // Create record with files in single request
+    const jsonData = { name, slug, status: 'pending', listo: false, created: new Date().toISOString() }
     const formData = new FormData()
-    formData.append('json', jsonData)
+    formData.append('json', JSON.stringify(jsonData))
     for (const f of files) formData.append('files', f)
-
-    const data = await pbFetch('/api/collections/hyworld_data/records', {
-      method: 'POST',
-      body: formData,
-    })
-    return data
+    return pbFetch('/api/collections/hyworld_data/records', { method: 'POST', body: formData })
   },
 
-  // Get single project
   async getProject(id) {
     const item = await pbFetch(`/api/collections/hyworld_data/records/${id}`)
+    if (!item) return null
+    let parsed = {}
+    try { parsed = typeof item.json === 'string' ? JSON.parse(item.json) : item.json } catch {}
     return {
       id: item.id,
-      slug: JSON.parse(item.json || '{}').slug || item.id,
-      name: JSON.parse(item.json || '{}').name || item.id,
-      status: JSON.parse(item.json || '{}').status || 'pending',
-      files: item.files || [],
+      slug: parsed.slug || item.id,
+      name: parsed.name || item.id,
+      status: parsed.status || 'pending',
+      listo: parsed.listo || false,
+      files: (item.files || []).map(f => `${PB_URL}/api/files/hyworld_data/${item.id}/${f}`),
       created: item.created,
     }
   },
 
-  // Mark project as processing (trigger)
-  async triggerProcessing(id) {
+  async updateProjectStatus(id, listo) {
+    let parsed = {}
+    try {
+      const current = await pbFetch(`/api/collections/hyworld_data/records/${id}`)
+      parsed = typeof current.json === 'string' ? JSON.parse(current.json) : current.json
+    } catch {}
+    const jsonData = { ...parsed, listo }
     return pbFetch(`/api/collections/hyworld_data/records/${id}`, {
       method: 'PATCH',
-      body: JSON.stringify({ json: JSON.stringify({ status: 'processing', triggered_at: new Date().toISOString() }) }),
+      body: JSON.stringify({ json: JSON.stringify(jsonData) }),
     })
   },
 
-  // Upload more images to existing project
+  async triggerProcessing(id) {
+    let parsed = {}
+    try {
+      const current = await pbFetch(`/api/collections/hyworld_data/records/${id}`)
+      parsed = typeof current.json === 'string' ? JSON.parse(current.json) : current.json
+    } catch {}
+    const jsonData = { ...parsed, status: 'processing', triggered_at: new Date().toISOString() }
+    return pbFetch(`/api/collections/hyworld_data/records/${id}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ json: JSON.stringify(jsonData) }),
+    })
+  },
+
   async uploadImages(id, files) {
     const formData = new FormData()
     for (const f of files) formData.append('files', f)
-    return pbFetch(`/api/collections/hyworld_data/records/${id}`, {
-      method: 'PATCH',
-      body: formData,
-    })
+    return pbFetch(`/api/collections/hyworld_data/records/${id}`, { method: 'PATCH', body: formData })
   },
 
-  // File URL helper
+  async deleteProject(id) {
+    return pbFetch(`/api/collections/hyworld_data/records/${id}`, { method: 'DELETE' })
+  },
+
   fileUrl(recordId, filename) {
-    const base = import.meta.env.VITE_PB_URL || import.meta.env.VITE_PB_URL_LOCAL || ''
-    return `${base}/api/files/hyworld_data/${recordId}/${filename}`
+    return `${PB_URL}/api/files/hyworld_data/${recordId}/${filename}`
   },
 }

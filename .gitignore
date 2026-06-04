@@ -1,1 +1,15 @@
+# Env
 .env
+
+# Local data (never commit)
+logs/
+projects/
+*.log
+
+# Build output
+dist/
+.next/
+
+# Temp
+.DS_Store
+Thumbs.db

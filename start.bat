@@ -1,34 +1,47 @@
 @echo off
-title HYWorld Web
+title HYWorld
 cd /d D:\GitHub\HYWorldWeb
 
-:: Kill any existing processes on ports 5000 and 5173
-echo Cleaning up ports...
-for /f "tokens=5" %%a in ('netstat -ano ^| findstr :5173 ^| findstr LISTENING') do taskkill /PID %%a /F >nul 2>&1
-for /f "tokens=5" %%a in ('netstat -ano ^| findstr :5000 ^| findstr LISTENING') do taskkill /PID %%a /F >nul 2>&1
-timeout /t 2 >nul
+:: ── 1. Detener todo lo anterior ──────────────────────────
+echo [HYWorld] Deteniendo servicios previos...
+call stop.bat >nul 2>&1
 
-:: Launch React/Vite dev server with pnpm
-echo Starting pnpm dev server on port 5173...
-start /b cmd /c "cd frontend && pnpm run dev > vite.log 2>&1"
+:: ── 2. Carpetas necesarias ───────────────────────────────
+if not exist "logs"     mkdir logs
+if not exist "projects" mkdir projects
 
-:: Wait for Vite
-echo Waiting for Vite to be ready...
+:: ── 3. Elegir Python (entorno conda, fallback a PATH) ────
+set "PYEXE=D:\Apps\miniconda3\envs\hyworld2\python.exe"
+if not exist "%PYEXE%" (
+    echo [HYWorld] AVISO: no se encontro %PYEXE%, usando 'python' del PATH
+    set "PYEXE=python"
+)
+
+:: ── 4. Frontend (Vite) en ventana propia ─────────────────
+echo [HYWorld] Iniciando frontend (Vite) en http://localhost:5173 ...
+start "HYWorld Web" cmd /c "cd /d D:\GitHub\HYWorldWeb\frontend && pnpm run dev > ..\logs\vite.log 2>&1"
+
+:: ── 5. Worker ML en ventana propia (log en vivo) ─────────
+echo [HYWorld] Iniciando ML worker (descarga proyectos + reconstruccion 3D)...
+start "HYWorld Worker" cmd /k "%PYEXE% -u scripts\worker.py"
+
+:: ── 6. Esperar a que Vite responda ───────────────────────
+echo [HYWorld] Esperando a Vite...
 for /L %%i in (1,1,60) do (
     curl -s http://localhost:5173 >nul 2>&1 && goto :ready
     timeout /t 1 >nul
-    echo Waiting... %%i/60
 )
-
 :ready
-echo.
-echo ====================================
-echo  HYWorld is running!
-echo  Web UI:   http://localhost:5173
-echo.
-echo  Logs: vite.log
-echo  Press Ctrl+C here to stop
-echo ====================================
-echo.
 
+start "" http://localhost:5173
+
+echo.
+echo ============================================
+echo  HYWorld en marcha
+echo  Web     : http://localhost:5173
+echo  Worker  : ventana "HYWorld Worker" (log en vivo)
+echo  Logs    : logs\worker_AAAAMMDD.log  ^|  logs\vite.log
+echo ============================================
+echo.
+echo Cierra esta ventana cuando quieras. Para detener todo usa stop.bat
 pause
