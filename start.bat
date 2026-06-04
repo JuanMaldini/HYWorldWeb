@@ -90,7 +90,29 @@ if exist "%DATA%\repo\.git" (
 )
 %LOG% "  Repo OK"
 
-:: ── 6. Imagen Docker ─────────────────────────────────────
+:: ── 6. Detectar cambios en Dockerfile / requirements.txt ───────
+set "BUILD_TRIGGERfile=%DATA%\build_trigger.txt"
+set "CURRENT_HASH="
+for %%F in ("%REPO%\Dockerfile" "%REPO%\requirements.txt") do (
+    for /f "tokens=*" %%H in ('powershell -NoProfile -Command "(Get-FileHash '%%~fF' -Algorithm MD5).Hash"') do (
+        set "CURRENT_HASH=!CURRENT_HASH!%%H"
+    )
+)
+if not exist "%BUILD_TRIGGERfile%" (
+    set "NEED_REBUILD=1"
+) else (
+    set /p PREV_HASH=<"%BUILD_TRIGGERfile%"
+    if "!CURRENT_HASH!" neq "!PREV_HASH!" set "NEED_REBUILD=1"
+)
+if defined NEED_REBUILD (
+    %LOG% "  Archivos de build detectados como nuevos/modificados — forzando rebuild"
+    docker rmi hyworld_ml:latest -f >nul 2>&1
+    echo !CURRENT_HASH! > "%BUILD_TRIGGERfile%"
+) else (
+    %LOG% "  Build cache: OK"
+)
+
+:: ── 7. Imagen Docker ─────────────────────────────────────
 %LOG% "Verificando imagen Docker..."
 docker image inspect hyworld_ml:latest >nul 2>&1
 if errorlevel 1 (
@@ -101,6 +123,10 @@ if errorlevel 1 (
         pause
         exit /b 1
     )
+    %LOG% "  Imagen construida OK"
+) else (
+    %LOG% "  Imagen OK (existe)"
+)
     %LOG% "  Imagen construida OK"
 ) else (
     %LOG% "  Imagen OK (existe)"

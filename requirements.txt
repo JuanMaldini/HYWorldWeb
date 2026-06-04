@@ -24,7 +24,7 @@ Pillow
 imageio[ffmpeg]
 decord
 imagesize
-opencv-python==4.10.0.84
+opencv-python-headless==4.10.0.84
 matplotlib==3.10.3
 scikit-image==0.25.2
 

@@ -17,6 +17,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     git-lfs \
     wget \
     libatomic1 \
+    libgl1-mesa-glx \
+    libgl1-mesa-dri \
+    libegl1 \
+    libglib2.0-0 \
     && git lfs install \
     && rm -rf /var/lib/apt/lists/*
 
@@ -38,12 +42,20 @@ RUN pip install --no-cache-dir \
     diffusers==0.36.0 transformers==5.2.0 accelerate peft==0.18.1 \
     safetensors zim_anything tensorboard omegaconf einops kornia openai \
     easydict scipy==1.14.1 timm==1.0.11 \
-    Pillow imageio[ffmpeg] decord imagesize opencv-python==4.10.0.84 \
+    Pillow imageio[ffmpeg] decord imagesize opencv-python-headless==4.10.0.84 \
     matplotlib==3.10.3 scikit-image==0.25.2 ftfy regex \
     trimesh plyfile open3d==0.18.0 pycolmap==3.10.0 \
     torchmetrics loguru==0.7.3 tqdm viser tyro==1.0.8 splines \
     pymeshlab==2023.12.post2 scikit-build-core nanobind pybind11 \
     numpy==1.26.4 psutil requests
+
+# ── cupy (requerido por hyworld2/worldrecon) ──────────────
+RUN pip install --no-cache-dir cupy-cuda12x==13.6.0
+
+# ── gsplat (REQUERIDO por worldrecon — sin esto ML=NO LISTO) ──
+# Arch de compilacion: Ampere (RTX 3080 = 8.6); ajustar si usas otra GPU.
+ENV TORCH_CUDA_ARCH_LIST="8.6"
+RUN pip install --no-build-isolation git+https://github.com/nerfstudio-project/gsplat.git
 
 # ── Git-based deps + flash-attn (optional, ignore failures) ──
 RUN pip install --no-build-isolation \

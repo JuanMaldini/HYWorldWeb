@@ -20,9 +20,7 @@ services:
     ports:
       - "5173:5173"
     volumes:
-      - /c/HyWorldWebData:/c/HyWorldWebData
-      - /c/HyWorldWebData/repo:/c/HyWorldWebData/repo
-      - /c/HyWorldWebData/models:/root/.cache/huggingface
+      - C:/HyWorldWebData:/c/HyWorldWebData
       - ./scripts:/workspace/scripts
     env_file:
       - C:/HyWorldWebData/.env
