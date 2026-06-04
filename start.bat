@@ -91,7 +91,7 @@ docker image inspect hyworld_ml:latest >nul 2>&1
 if errorlevel 1 (
     %LOG% "Construyendo imagen Docker (primera vez)..."
     %LOG% "Puede tardar 10-20 minutos."
-    docker compose build --no-cache >>"%LOGFILE%" 2>&1
+    docker compose build --no-cache --tag hyworld_ml:latest >>"%LOGFILE%" 2>&1
     if errorlevel 1 (
         %LOG% "ERROR: Fallo el build. Ver %LOGFILE%"
         pause

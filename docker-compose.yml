@@ -1,17 +1,15 @@
 # ============================================================
 # HYWorld — docker-compose.yml
-# Ubicación: D:\GitHub\HYWorldWeb\docker-compose.yml
 # ============================================================
 
 services:
   hyworld:
+    image: hyworld_ml:latest
     build:
       context: .
       dockerfile: Dockerfile
     container_name: hyworld_ml
     restart: unless-stopped
-
-    # GPU NVIDIA
     deploy:
       resources:
         reservations:
@@ -19,45 +17,22 @@ services:
             - driver: nvidia
               count: 1
               capabilities: [gpu]
-
-    # Puertos
     ports:
       - "5173:5173"
-
-    # Volúmenes — todo en C:\HyWorldWebData
     volumes:
-      # Carpeta de datos
-      - C:\HyWorldWebData:C:\HyWorldWebData
-
-      # Repo HY-World-2.0 (montado en la ruta que el worker espera)
-      - C:\HyWorldWebData\repo:C:\HyWorldWebData\repo
-
-      # Cache de HuggingFace (modelos descargados)
-      # Los modelos se descargan aquí la primera vez y persisten
-      # entre corridas. Si se borra esta carpeta, se re-descargan.
-      - C:\HyWorldWebData\models:/root/.cache/huggingface
-
-      # Worker.py y scripts desde el host
-      - ./scripts:/workspace/scripts
-
-    # Variables de entorno desde .env
+      - /c/HyWorldWebData:/c/HyWorldWebData
+      - /c/HyWorldWebData/repo:/c/HyWorldWebData/repo
+      - /c/HyWorldWebData/models:/root/.cache/huggingface
+      - ${PWD}/scripts:/workspace/scripts
     env_file:
-      - C:\HyWorldWebData\.env
-
+      - C:/HyWorldWebData/.env
     environment:
-      # PyTorch: usar GPU si está disponible
       - CUDA_VISIBLE_DEVICES=0
-      # PyTorch verbose allocator
       - PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-      # Ruta del repo HY-World-2.0 dentro del contenedor
-      - HYWORLD_DIR=C:\HyWorldWebData\repo
-      # Carpeta de trabajo del worker
-      - PROJECTS_DIR=C:\HyWorldWebData\projects
-      - LOGS_DIR=C:\HyWorldWebData\logs
-      # Python path para imports
-      - PYTHONPATH=C:\HyWorldWebData\repo\hyworld2\panogen;C:\HyWorldWebData\repo
-
-    # Healthcheck simple
+      - HYWORLD_DIR=/c/HyWorldWebData/repo
+      - PROJECTS_DIR=/c/HyWorldWebData/projects
+      - LOGS_DIR=/c/HyWorldWebData/logs
+      - PYTHONPATH=/c/HyWorldWebData/repo/hyworld2/panogen:/c/HyWorldWebData/repo
     healthcheck:
       test: ["CMD", "python3.11", "-c", "import torch; assert torch.cuda.is_available()"]
       interval: 30s

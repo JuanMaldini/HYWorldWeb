@@ -7,7 +7,7 @@
 set -e
 
 WORKSPACE="/workspace"
-HYWORLD_DATA="C:/HyWorldWebData"
+HYWORLD_DATA="/c/HyWorldWebData"
 PROJECTS_DIR="$HYWORLD_DATA/projects"
 LOGS_DIR="$HYWORLD_DATA/logs"
 MODELS_DIR="$HYWORLD_DATA/models"
@@ -42,31 +42,20 @@ if [ -d "$HF_CACHE_ROOT" ]; then
     find "$HF_CACHE_ROOT" -name "*.lock" -delete 2>/dev/null || true
 fi
 
-# ── Fix paths para Windows → Linux translation ─────────────
-# Docker Desktop traduce C:\HyWorldWebData\... a la ruta correcta
-# dentro del contenedor Ubuntu. Ajustamos segun el OS del contenedor.
-if [ -d "/c/HyWorldWebData" ]; then
-    # Git Bash / WSL style
-    export HYWORLD_DIR="/c/HyWorldWebData/repo"
-    export PROJECTS_DIR="/c/HyWorldWebData/projects"
-    export LOGS_DIR="/c/HyWorldWebData/logs"
-    export PYTHONPATH="/c/HyWorldWebData/repo/hyworld2/panogen:/c/HyWorldWebData/repo"
-elif [ -d "C:/HyWorldWebData" ]; then
-    # Native Ubuntu (Windows paths translated by Docker)
-    export HYWORLD_DIR="C:/HyWorldWebData/repo"
-    export PROJECTS_DIR="C:/HyWorldWebData/projects"
-    export LOGS_DIR="C:/HyWorldWebData/logs"
-    export PYTHONPATH="C:/HyWorldWebData/repo/hyworld2/panogen:C:/HyWorldWebData/repo"
-fi
+# ── Paths (Git Bash style /c/) ────────────────────────────
+export HYWORLD_DIR="/c/HyWorldWebData/repo"
+export PROJECTS_DIR="/c/HyWorldWebData/projects"
+export LOGS_DIR="/c/HyWorldWebData/logs"
+export PYTHONPATH="/c/HyWorldWebData/repo/hyworld2/panogen:/c/HyWorldWebData/repo"
 
-# ── Handover script — configura sys.path y ejecuta worker ──
+# ── Handover script ─────────────────────────────────────────
 WORKER_WRAPPER="/workspace/scripts/run_worker_docker.py"
 if [ ! -f "$WORKER_WRAPPER" ]; then
     echo "[HYWorld] ERROR: $WORKER_WRAPPER no existe"
     tail -f /dev/null
 fi
 
-# ── Directorio de trabajo del worker ──────────────────────
+# ── Directorio de trabajo ──────────────────────────────────
 cd /workspace
 
 # ── Logging ───────────────────────────────────────────────
@@ -86,7 +75,7 @@ echo "============================================================"
 # ── Verificar .env ─────────────────────────────────────────
 if [ -z "$PB_URL" ] || [ -z "$PB_ADMIN_TOKEN" ]; then
     echo "[HYWorld] ERROR: PB_URL o PB_ADMIN_TOKEN no estan definidos"
-    echo "[HYWorld] Edita C:\\HyWorldWebData\\.env y reinicia."
+    echo "[HYWorld] Edita C:/HyWorldWebData/.env y reinicia."
     tail -f /dev/null
 fi
 
