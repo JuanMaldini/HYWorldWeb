@@ -1,37 +1,30 @@
 @echo off
-title HYWorld — Stop
-cd /d D:\GitHub\HYWorldWeb
+title HYWorld - Stop
 
-:: ── Logging ───────────────────────────────────────────────
-for /f "tokens=1-4 delims=/ " %%a in ('date /t') do set y=%%a&set m=%%b&set d=%%c
-for /f "tokens=1-2 delims=: " %%a in ('time /t') do set hh=%%a&set mm=%%b
-set LOGFILE=C:\HyWorldWebData\logs\start_%y%%m%%d%_%hh%%mm%.log
+:: ── Rutas (portable) ──────────────────────────────────────
+set "REPO=%~dp0"
+if "%REPO:~-1%"=="\" set "REPO=%REPO:~0,-1%"
+set "DATA=C:\HyWorldWebData"
+cd /d "%REPO%"
+
+if not exist "%DATA%\logs" mkdir "%DATA%\logs"
+set "STOPLOG=%DATA%\logs\stop.log"
 
 echo [%time%] [HYWorld] Deteniendo contenedor...
-if exist "C:\HyWorldWebData\logs" (
-    echo [%time%] [HYWorld] Deteniendo contenedor... >> "C:\HyWorldWebData\logs\stop.log"
-)
+echo [%time%] [HYWorld] Deteniendo contenedor...>> "%STOPLOG%"
 
-:: Bajar contenedor si existe
-docker compose down >>"C:\HyWorldWebData\logs\stop.log" 2>&1
+:: Bajar contenedor via compose
+docker compose -f "%REPO%\docker-compose.yml" down >>"%STOPLOG%" 2>&1
 
-:: Por si queda algun proceso hurfano
-docker ps -a | findstr "hyworld_ml" >nul 2>&1
+:: Por si queda algun contenedor huerfano
+docker ps -a --format "{{.Names}}" | findstr /i "hyworld_ml" >nul 2>&1
 if not errorlevel 1 (
-    echo [%time%] [HYWorld] Forzando detencion... >> "C:\HyWorldWebData\logs\stop.log" 2>&1
-    docker kill hyworld_ml >>"C:\HyWorldWebData\logs\stop.log" 2>&1
-    docker rm hyworld_ml >>"C:\HyWorldWebData\logs\stop.log" 2>&1
-)
-
-:: Limpiar procesos sueltos (python worker.py)
-for /f "tokens=1" %%a in (
-    'wmic process where "name='"'"'python.exe'"'"' and commandline like '"'"'%%worker.py%%'"'"'" get processid 2^>nul ^| findstr /r "[0-9]"'
-) do (
-    echo [%time%] [HYWorld] Matando proceso python残余: %%a >> "C:\HyWorldWebData\logs\stop.log" 2>&1
-    taskkill /F /PID %%a >nul 2>&1
+    echo [%time%] [HYWorld] Forzando detencion...>> "%STOPLOG%"
+    docker kill hyworld_ml >>"%STOPLOG%" 2>&1
+    docker rm hyworld_ml   >>"%STOPLOG%" 2>&1
 )
 
 echo [%time%] [HYWorld] Contenedor detenido.
-echo [%time%] [HYWorld] Contenedor detenido. >> "C:\HyWorldWebData\logs\stop.log" 2>&1
-echo [HYWorld] Listo.
-echo Para reiniciar: D:\GitHub\HYWorldWeb\start.bat
+echo [%time%] [HYWorld] Contenedor detenido.>> "%STOPLOG%"
+echo [HYWorld] Listo. Para reiniciar: "%REPO%\start.bat"
+timeout /t 3 >nul

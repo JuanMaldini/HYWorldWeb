@@ -3,7 +3,7 @@
 # Base: NVIDIA CUDA 12.8 + Ubuntu 22.04 + Python 3.11
 # ============================================================
 
-FROM nvidia/cuda:12.8.1-runtime-ubuntu22.04
+FROM nvidia/cuda:12.8.1-devel-ubuntu22.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -45,10 +45,13 @@ RUN pip install --no-cache-dir \
     pymeshlab==2023.12.post2 scikit-build-core nanobind pybind11 \
     numpy==1.26.4 psutil requests
 
-# ── Git-based deps (optional, ignore failures) ────────────
+# ── Git-based deps + flash-attn (optional, ignore failures) ──
 RUN pip install --no-build-isolation \
     git+https://github.com/rahul-goel/fused-ssim@328dc9836f513d00c4b5bc38fe30478b4435cbb5 \
     git+https://github.com/nianticlabs/spz.git@v3.0.0 || true
+
+# ── flash-attn (requires CUDA kernel compilation — may fail on some GPUs) ──
+RUN pip install flash-attn --no-build-isolation || true
 
 # ── Entry point ────────────────────────────────────────────
 COPY entrypoint.sh /entrypoint.sh

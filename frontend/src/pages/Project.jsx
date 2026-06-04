@@ -73,7 +73,7 @@ export default function Project({ user }) {
     </div>
   )
 
-  const DEF = { target_size: 952, max_resolution: 1920, apply_sky_mask: true, apply_edge_mask: true, apply_confidence_mask: false, save_gs: true, save_points: true }
+  const DEF = { full_360: false, target_size: 952, max_resolution: 1920, apply_sky_mask: true, apply_edge_mask: true, apply_confidence_mask: false, save_gs: true, save_points: true }
   const sval = (k) => (settings[k] === undefined ? DEF[k] : settings[k])
   const setS = (k, v) => { setSettings(s => ({ ...s, [k]: v })); setSavedS(false) }
   const saveSettings = async () => {
@@ -166,6 +166,22 @@ export default function Project({ user }) {
         <div style={{ background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 12, padding: '20px 24px', marginBottom: 32, maxWidth: 560 }}>
           <div style={{ fontSize: 15, fontWeight: 600, marginBottom: 4 }}>Ajustes de reconstruccion</div>
           <div style={{ fontSize: 12, color: 'var(--text-dim)', marginBottom: 18 }}>Se aplican la proxima vez que el worker procese (activa "Listo" despues de guardar).</div>
+
+          {/* Modo de generacion: 360 completo vs solo frente */}
+          <label style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12,
+            background: 'var(--bg-dark)', border: `1px solid ${sval('full_360') ? 'var(--accent)' : 'var(--border)'}`,
+            borderRadius: 8, padding: '12px 14px', marginBottom: 18, cursor: 'pointer' }}>
+            <span>
+              <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text)' }}>Generacion 360 completa</div>
+              <div style={{ fontSize: 12, color: 'var(--text-dim)', marginTop: 2 }}>
+                {sval('full_360')
+                  ? 'ON — panorama 360 + multiview + GLB completo (mas lento)'
+                  : 'OFF — solo la imagen de frente (GLB rapido del frente)'}
+              </div>
+            </span>
+            <input type="checkbox" checked={!!sval('full_360')} onChange={e => setS('full_360', e.target.checked)}
+              style={{ width: 20, height: 20, accentColor: 'var(--accent)', cursor: 'pointer', flexShrink: 0 }} />
+          </label>
 
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginBottom: 18 }}>
             <label style={{ fontSize: 13 }}>

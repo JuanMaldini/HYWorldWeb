@@ -23,7 +23,7 @@ services:
       - /c/HyWorldWebData:/c/HyWorldWebData
       - /c/HyWorldWebData/repo:/c/HyWorldWebData/repo
       - /c/HyWorldWebData/models:/root/.cache/huggingface
-      - ${PWD}/scripts:/workspace/scripts
+      - ./scripts:/workspace/scripts
     env_file:
       - C:/HyWorldWebData/.env
     environment:

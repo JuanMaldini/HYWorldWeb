@@ -1,119 +1,129 @@
 @echo off
-title HYWorld — Start
+setlocal EnableDelayedExpansion
+title HYWorld - Start
 
-:: ── 0. Setup log directorio y archivo ───────────────────
-if not exist "C:\HyWorldWebData\logs" mkdir "C:\HyWorldWebData\logs"
-set LOGFILE=C:\HyWorldWebData\logs\start_log.txt
-echo. > "%LOGFILE%"
-echo ========================================= >> "%LOGFILE%"
-echo HYWorld Start.bat — iniciado %date% %time% >> "%LOGFILE%"
-echo ========================================= >> "%LOGFILE%"
+:: ── Rutas (portable: el repo es la carpeta de este .bat) ──
+set "REPO=%~dp0"
+if "%REPO:~-1%"=="\" set "REPO=%REPO:~0,-1%"
+set "DATA=C:\HyWorldWebData"
 
-:: ── 0b. Funcion para loggear sin drama ──────────────────
+:: ── 0. Setup log ──────────────────────────────────────────
+if not exist "%DATA%\logs" mkdir "%DATA%\logs"
+set "LOGFILE=%DATA%\logs\start_log.txt"
 set "LOG=call :log"
+
 goto :main
 
 :log
 echo [%time%] %~1
-echo [%time%] %~1 >> "%LOGFILE%"
+echo [%time%] %~1>> "%LOGFILE%"
 exit /b 0
 
 :main
-%LOG% "Verificando Docker Engine..."
+%LOG% "=========================================="
+%LOG% " HYWorld Start - %date% %time%"
+%LOG% " Repo: %REPO%"
+%LOG% "=========================================="
+
+:: ── 1. Docker corriendo? ─────────────────────────────────
+%LOG% "Verificando Docker..."
 docker info >nul 2>&1
 if errorlevel 1 (
-    %LOG% "ERROR: Docker no esta corriendo."
-    %LOG% "Abre Docker Desktop y espera. Luego ejecuta de nuevo."
+    %LOG% "ERROR: Docker no esta corriendo. Abrir Docker Desktop."
     pause
     exit /b 1
 )
-%LOG% "Docker: OK"
+%LOG% "  Docker: OK"
 
-%LOG% "Deteniendo servicios previos..."
-call stop.bat >>"%LOGFILE%" 2>&1
+:: ── 2. Bajar contenedor previo ───────────────────────────
+%LOG% "Deteniendo contenedor previo..."
+docker compose -f "%REPO%\docker-compose.yml" down >>"%LOGFILE%" 2>&1
 
+:: ── 3. Crear estructura de datos ─────────────────────────
 %LOG% "Verificando carpeta de datos..."
-if not exist "C:\HyWorldWebData" (
-    %LOG% "Creando C:\HyWorldWebData..."
-    mkdir "C:\HyWorldWebData"
-)
-if not exist "C:\HyWorldWebData\models"    mkdir "C:\HyWorldWebData\models"    2>nul
-if not exist "C:\HyWorldWebData\repo"      mkdir "C:\HyWorldWebData\repo"      2>nul
-if not exist "C:\HyWorldWebData\projects"  mkdir "C:\HyWorldWebData\projects"  2>nul
-if not exist "C:\HyWorldWebData\logs"     mkdir "C:\HyWorldWebData\logs"     2>nul
+if not exist "%DATA%"           mkdir "%DATA%"
+if not exist "%DATA%\models"    mkdir "%DATA%\models"
+if not exist "%DATA%\repo"      mkdir "%DATA%\repo"
+if not exist "%DATA%\projects"  mkdir "%DATA%\projects"
+if not exist "%DATA%\logs"      mkdir "%DATA%\logs"
 
-%LOG% "Verificando configuracion..."
-if not exist "C:\HyWorldWebData\.env" (
-    %LOG% "=============================================="
-    %LOG% ".env no encontrado — creando plantilla..."
-    %LOG% "=============================================="
+:: ── 4. Verificar .env ───────────────────────────────────
+%LOG% "Verificando configuracion (.env)..."
+if not exist "%DATA%\.env" (
+    %LOG% "  .env no existe - creando plantilla..."
     (
-        echo # PocketBase Configuration
         echo PB_URL=https://pocketbase.vmoliver.cloud
         echo PB_ADMIN_TOKEN=
-        *** POLL_INTERVAL=10
-    ) > "C:\HyWorldWebData\.env"
-    %LOG% "AVISO: EDITAR C:\HyWorldWebData\.env ANTES de continuar."
-    %LOG% "Agregar PB_ADMIN_TOKEN y volver a ejecutar."
+        echo POLL_INTERVAL=10
+    ) > "%DATA%\.env"
+    %LOG% "=============================================="
+    %LOG% "ATENCION: Editar %DATA%\.env"
+    %LOG% "Agregar PB_ADMIN_TOKEN, luego ejecutar de nuevo."
     %LOG% "=============================================="
     pause
     exit /b 1
 )
 
-findstr /i "PB_ADMIN_TOKEN=" "C:\HyWorldWebData\.env" >nul 2>&1
+findstr /i "PB_ADMIN_TOKEN=" "%DATA%\.env" >nul 2>&1
 if errorlevel 1 (
-    %LOG% "ERROR: .env sin PB_ADMIN_TOKEN."
+    %LOG% "ERROR: .env sin PB_ADMIN_TOKEN"
     pause
     exit /b 1
 )
-
-for /f "tokens=2 delims==" %%a in ('findstr /i "PB_ADMIN_TOKEN" "C:\HyWorldWebData\.env"') do (
+for /f "tokens=2 delims==" %%a in ('findstr /i "PB_ADMIN_TOKEN" "%DATA%\.env"') do (
     if "%%a"=="" (
-        %LOG% "ERROR: PB_ADMIN_TOKEN esta vacio."
+        %LOG% "ERROR: PB_ADMIN_TOKEN vacio. Editar .env"
         pause
         exit /b 1
     )
 )
-%LOG% "Configuracion: OK"
+%LOG% "  Configuracion: OK"
 
-%LOG% "Sincronizando repo HY-World-2.0..."
-if exist "C:\HyWorldWebData\repo\.git" (
-    %LOG% "Repo existe — git pull..."
-    git -C "C:\HyWorldWebData\repo" pull origin main >>"%LOGFILE%" 2>&1
+:: ── 5. Sync HY-World-2.0 repo ────────────────────────────
+%LOG% "Sincronizando HY-World-2.0..."
+if exist "%DATA%\repo\.git" (
+    %LOG% "  git pull..."
+    git -C "%DATA%\repo" pull origin main >>"%LOGFILE%" 2>&1
 ) else (
-    %LOG% "Clonando HY-World-2.0..."
-    git clone --depth=1 https://github.com/Tencent-Hunyuan/HY-World-2.0 "C:\HyWorldWebData\repo" >>"%LOGFILE%" 2>&1
+    %LOG% "  clonando..."
+    git clone --depth=1 https://github.com/Tencent-Hunyuan/HY-World-2.0 "%DATA%\repo" >>"%LOGFILE%" 2>&1
 )
-%LOG% "Repo sincronizado."
+%LOG% "  Repo OK"
 
+:: ── 6. Imagen Docker ─────────────────────────────────────
 %LOG% "Verificando imagen Docker..."
 docker image inspect hyworld_ml:latest >nul 2>&1
 if errorlevel 1 (
-    %LOG% "Construyendo imagen Docker (primera vez)..."
-    %LOG% "Puede tardar 10-20 minutos."
-    docker compose build --no-cache --tag hyworld_ml:latest >>"%LOGFILE%" 2>&1
+    %LOG% "  Construyendo imagen (primera vez puede tardar 20+ min)..."
+    docker build -t hyworld_ml:latest -f "%REPO%\Dockerfile" "%REPO%" >>"%LOGFILE%" 2>&1
     if errorlevel 1 (
-        %LOG% "ERROR: Fallo el build. Ver %LOGFILE%"
+        %LOG% "ERROR: Build fallo. Ver %LOGFILE%"
         pause
         exit /b 1
     )
-    %LOG% "Imagen construida OK."
+    %LOG% "  Imagen construida OK"
 ) else (
-    %LOG% "Imagen: OK"
+    %LOG% "  Imagen OK (existe)"
 )
 
-%LOG% "Iniciando contenedor..."
-docker compose up -d >>"%LOGFILE%" 2>&1
-%LOG% "Contenedor iniciado."
+:: ── 7. Levantar contenedor ────────────────────────────────
+%LOG% "Levantando contenedor..."
+docker compose -f "%REPO%\docker-compose.yml" up -d >>"%LOGFILE%" 2>&1
 
-%LOG% "=========================================================="
-%LOG% " HYWorld iniciado OK"
-%LOG% " Log: %LOGFILE%"
-%LOG% " Ver worker: docker logs hyworld_ml -f"
-%LOG% "=========================================================="
+:: ── 8. Esperar a que arranque ────────────────────────────
+%LOG% "Esperando a que el worker arranque..."
+for /L %%i in (1,1,12) do (
+    timeout /t 5 >nul
+    docker ps --filter "name=hyworld_ml" --format "{{.Status}}" | findstr /i "Up" >nul 2>&1
+    if not errorlevel 1 goto :container_up
+)
+:container_up
+docker ps --filter "name=hyworld_ml" --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}" >>"%LOGFILE%" 2>&1
 
-echo.
-echo ===========================================================
-echo  Ver log en: %LOGFILE%
-echo ===========================================================
-pause
+%LOG% "=========================================="
+%LOG% " CONTENEDOR INICIADO - abriendo ventana de logs"
+%LOG% "=========================================="
+
+:: ── 9. Abrir SOLO la ventana de logs y cerrar esta ────────
+start "HYWorld - Logs" cmd /k "docker logs -f hyworld_ml"
+exit

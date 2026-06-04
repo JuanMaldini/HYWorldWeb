@@ -10,13 +10,13 @@ import os
 import sys
 
 # ── Paths ─────────────────────────────────────────────────
-os.environ["HYWORLD_DIR"]   = r"C:\HyWorldWebData\repo"
-os.environ["PROJECTS_DIR"]  = r"C:\HyWorldWebData\projects"
-os.environ["LOGS_DIR"]     = r"C:\HyWorldWebData\logs"
-os.environ["PYTHONPATH"]    = r"C:\HyWorldWebData\repo\hyworld2\panogen;C:\HyWorldWebData\repo"
+os.environ["HYWORLD_DIR"]   = r"/c/HyWorldWebData/repo"
+os.environ["PROJECTS_DIR"]  = r"/c/HyWorldWebData/projects"
+os.environ["LOGS_DIR"]     = r"/c/HyWorldWebData/logs"
+os.environ["PYTHONPATH"]    = r"/c/HyWorldWebData/repo/hyworld2/panogen:/c/HyWorldWebData/repo"
 
 # ── sys.path ───────────────────────────────────────────────
-_HYWORLD = r"C:\HyWorldWebData\repo"
+_HYWORLD = r"/c/HyWorldWebData/repo"
 _PANOGEN = os.path.join(_HYWORLD, "hyworld2", "panogen")
 if _HYWORLD not in sys.path:
     sys.path.insert(0, _HYWORLD)
@@ -24,7 +24,7 @@ if _PANOGEN not in sys.path:
     sys.path.insert(0, _PANOGEN)
 
 # ── Cargar .env ───────────────────────────────────────────
-_ENV_FILE = r"C:\HyWorldWebData\.env"
+_ENV_FILE = "/c/HyWorldWebData/.env"
 if os.path.exists(_ENV_FILE):
     for line in open(_ENV_FILE, encoding="utf-8"):
         line = line.strip()
