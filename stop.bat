@@ -1,18 +1,37 @@
 @echo off
-echo [HYWorld] Deteniendo servicios...
+title HYWorld — Stop
+cd /d D:\GitHub\HYWorldWeb
 
-:: Vite dev server (puerto 5173)
-for /f "tokens=5" %%a in ('netstat -ano ^| findstr :5173 ^| findstr LISTENING') do (
-    taskkill /PID %%a /F >nul 2>&1
+:: ── Logging ───────────────────────────────────────────────
+for /f "tokens=1-4 delims=/ " %%a in ('date /t') do set y=%%a&set m=%%b&set d=%%c
+for /f "tokens=1-2 delims=: " %%a in ('time /t') do set hh=%%a&set mm=%%b
+set LOGFILE=C:\HyWorldWebData\logs\start_%y%%m%%d%_%hh%%mm%.log
+
+echo [%time%] [HYWorld] Deteniendo contenedor...
+if exist "C:\HyWorldWebData\logs" (
+    echo [%time%] [HYWorld] Deteniendo contenedor... >> "C:\HyWorldWebData\logs\stop.log"
 )
 
-:: Ventanas por titulo
-taskkill /F /FI "WINDOWTITLE eq HYWorld Worker*" >nul 2>&1
-taskkill /F /FI "WINDOWTITLE eq HYWorld Web*"    >nul 2>&1
+:: Bajar contenedor si existe
+docker compose down >>"C:\HyWorldWebData\logs\stop.log" 2>&1
 
-:: Cualquier python suelto corriendo worker.py
-for /f "tokens=1" %%a in ('wmic process where "name='python.exe' and commandline like '%%worker.py%%'" get processid 2^>nul ^| findstr /r "[0-9]"') do (
+:: Por si queda algun proceso hurfano
+docker ps -a | findstr "hyworld_ml" >nul 2>&1
+if not errorlevel 1 (
+    echo [%time%] [HYWorld] Forzando detencion... >> "C:\HyWorldWebData\logs\stop.log" 2>&1
+    docker kill hyworld_ml >>"C:\HyWorldWebData\logs\stop.log" 2>&1
+    docker rm hyworld_ml >>"C:\HyWorldWebData\logs\stop.log" 2>&1
+)
+
+:: Limpiar procesos sueltos (python worker.py)
+for /f "tokens=1" %%a in (
+    'wmic process where "name='"'"'python.exe'"'"' and commandline like '"'"'%%worker.py%%'"'"'" get processid 2^>nul ^| findstr /r "[0-9]"'
+) do (
+    echo [%time%] [HYWorld] Matando proceso python残余: %%a >> "C:\HyWorldWebData\logs\stop.log" 2>&1
     taskkill /F /PID %%a >nul 2>&1
 )
 
+echo [%time%] [HYWorld] Contenedor detenido.
+echo [%time%] [HYWorld] Contenedor detenido. >> "C:\HyWorldWebData\logs\stop.log" 2>&1
 echo [HYWorld] Listo.
+echo Para reiniciar: D:\GitHub\HYWorldWeb\start.bat

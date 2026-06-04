@@ -195,6 +195,20 @@ code { font-family: 'JetBrains Mono', ui-monospace, monospace; }
 .status-pending    { background: #232739; color: var(--text-dim); }
 .status-processing { background: #2b2616; color: var(--warning); }
 .status-completed  { background: #1d2b1a; color: var(--success); }
+.status-error      { background: #2d1b22; color: var(--danger); }
+
+/* Punto pulsante para estados activos (pending/processing) */
+.dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 6px; vertical-align: middle; }
+.dot-wait { background: var(--warning); animation: pulse 1.4s ease-in-out infinite; }
+.dot-proc { background: var(--cyan);    animation: pulse 1s   ease-in-out infinite; }
+@keyframes pulse { 0%,100% { opacity: 1; transform: scale(1); } 50% { opacity: .35; transform: scale(.7); } }
+
+/* Barra indeterminada de progreso */
+.bar { height: 4px; background: var(--border-soft); border-radius: 2px; overflow: hidden; }
+.bar > span { display: block; height: 100%; width: 35%; border-radius: 2px;
+  background: linear-gradient(90deg, transparent, var(--cyan), transparent);
+  animation: slide 1.3s ease-in-out infinite; }
+@keyframes slide { 0% { transform: translateX(-120%); } 100% { transform: translateX(360%); } }
 
 /* ─── Empty state ────────────────────────────────────────── */
 .empty-state { text-align: center; padding: 80px 20px; color: var(--text-dim); }

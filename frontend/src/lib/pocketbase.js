@@ -57,6 +57,7 @@ export const api = {
         name: parsed.name || item.id,
         status: parsed.status || 'pending',
         listo: parsed.listo || false,
+        settings: parsed.settings || {},
         created: item.created,
         thumb,
         files: (item.files || []).map(f => `${PB_URL}/api/files/hyworld_data/${item.id}/${f}`),
@@ -84,8 +85,10 @@ export const api = {
       name: parsed.name || item.id,
       status: parsed.status || 'pending',
       listo: parsed.listo || false,
+      settings: parsed.settings || {},
       files: (item.files || []).map(f => `${PB_URL}/api/files/hyworld_data/${item.id}/${f}`),
       created: item.created,
+      _raw: item.files || [],
     }
   },
 
@@ -96,6 +99,54 @@ export const api = {
       parsed = typeof current.json === 'string' ? JSON.parse(current.json) : current.json
     } catch {}
     const jsonData = { ...parsed, listo }
+    return pbFetch(`/api/collections/hyworld_data/records/${id}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ json: JSON.stringify(jsonData) }),
+    })
+  },
+
+  async generateMesh(id) {
+    let parsed = {}
+    try {
+      const current = await pbFetch(`/api/collections/hyworld_data/records/${id}`)
+      parsed = typeof current.json === 'string' ? JSON.parse(current.json) : current.json
+    } catch {}
+    // Calidad maxima fija para la malla final
+    const maxSettings = {
+      ...(parsed.settings || {}),
+      target_size: 1120, max_resolution: 2560,
+      apply_sky_mask: true, apply_edge_mask: true,
+      save_gs: true, save_points: true,
+    }
+    const jsonData = { ...parsed, settings: maxSettings, mesh: true, regenerate: true, status: 'pending', triggered_at: new Date().toISOString() }
+    console.debug('[HYWorld] generateMesh', id, jsonData)
+    return pbFetch(`/api/collections/hyworld_data/records/${id}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ json: JSON.stringify(jsonData) }),
+    })
+  },
+
+  async regenerate(id) {
+    let parsed = {}
+    try {
+      const current = await pbFetch(`/api/collections/hyworld_data/records/${id}`)
+      parsed = typeof current.json === 'string' ? JSON.parse(current.json) : current.json
+    } catch {}
+    const jsonData = { ...parsed, regenerate: true, status: 'pending', triggered_at: new Date().toISOString() }
+    console.debug('[HYWorld] regenerate', id, jsonData)
+    return pbFetch(`/api/collections/hyworld_data/records/${id}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ json: JSON.stringify(jsonData) }),
+    })
+  },
+
+  async updateProjectSettings(id, settings) {
+    let parsed = {}
+    try {
+      const current = await pbFetch(`/api/collections/hyworld_data/records/${id}`)
+      parsed = typeof current.json === 'string' ? JSON.parse(current.json) : current.json
+    } catch {}
+    const jsonData = { ...parsed, settings }
     return pbFetch(`/api/collections/hyworld_data/records/${id}`, {
       method: 'PATCH',
       body: JSON.stringify({ json: JSON.stringify(jsonData) }),

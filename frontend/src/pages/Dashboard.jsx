@@ -30,6 +30,8 @@ export default function Dashboard({ user, onLogout }) {
 
   useEffect(() => {
     fetchProjects()
+    const t = setInterval(fetchProjects, 5000)
+    return () => clearInterval(t)
   }, [])
 
   const handleFileChange = (selected) => {
@@ -137,7 +139,7 @@ export default function Dashboard({ user, onLogout }) {
                     >🗑</button>
                   </div>
                   <div className="project-meta">
-                    <span className={`status status-${p.status}`}>{p.status}</span>
+                    <Status s={p.status} />
                     <span>{new Date(p.created).toLocaleDateString()}</span>
                   </div>
                 </div>
@@ -301,5 +303,20 @@ export default function Dashboard({ user, onLogout }) {
         </div>
       )}
     </div>
+  )
+}
+
+function Status({ s }) {
+  const map = {
+    pending:    ['En espera', 'dot-wait'],
+    processing: ['Generando', 'dot-proc'],
+    completed:  ['Listo', ''],
+    error:      ['Error', ''],
+  }
+  const [label, dot] = map[s] || [s, '']
+  return (
+    <span className={`status status-${s}`}>
+      {dot && <span className={`dot ${dot}`} />}{label}
+    </span>
   )
 }
