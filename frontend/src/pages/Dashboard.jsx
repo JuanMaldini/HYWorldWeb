@@ -8,7 +8,6 @@ export default function Dashboard({ user, onLogout }) {
   const [loading, setLoading] = useState(true)
   const [showModal, setShowModal] = useState(false)
   const [deleteTarget, setDeleteTarget] = useState(null)
-  const [name, setName] = useState('')
   const [files, setFiles] = useState([])
   const [preview, setPreview] = useState(null)
   const [creating, setCreating] = useState(false)
@@ -49,12 +48,12 @@ export default function Dashboard({ user, onLogout }) {
   }
 
   const handleCreate = async () => {
-    if (!name.trim()) { setError('Project name is required'); return }
     if (files.length === 0) { setError('At least one cover image is required'); return }
     setError('')
     setCreating(true)
     try {
-      const record = await api.createProject(name.trim(), files)
+      const firstFile = files[0]
+      const record = await api.createProject(firstFile.name, files)
       const slug = (() => {
         try {
           const j = typeof record.json === 'string' ? JSON.parse(record.json) : record.json
@@ -62,7 +61,6 @@ export default function Dashboard({ user, onLogout }) {
         } catch { return record.id }
       })()
       setShowModal(false)
-      setName('')
       setFiles([])
       setPreview(null)
       navigate(`/p/${slug}`)
@@ -76,7 +74,6 @@ export default function Dashboard({ user, onLogout }) {
 
   const closeModal = () => {
     setShowModal(false)
-    setName('')
     setFiles([])
     setPreview(null)
     setError('')
@@ -208,29 +205,7 @@ export default function Dashboard({ user, onLogout }) {
               </div>
             )}
 
-            <div style={{ marginBottom: 20 }}>
-              <label style={{ display: 'block', fontSize: 12, color: 'var(--text-dim)', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '0.5px' }}>Project Name</label>
-              <input
-                type="text"
-                value={name}
-                onChange={e => { setName(e.target.value); setError('') }}
-                placeholder="My 3D Scene"
-                style={{
-                  width: '100%',
-                  background: 'var(--bg-dark)',
-                  border: '1px solid var(--border)',
-                  borderRadius: 8,
-                  padding: '12px 16px',
-                  color: 'var(--text)',
-                  fontSize: 14,
-                  outline: 'none',
-                  transition: 'border-color 0.2s',
-                }}
-                onFocus={e => e.target.style.borderColor = 'var(--accent)'}
-                onBlur={e => e.target.style.borderColor = 'var(--border)'}
-                autoFocus
-              />
-            </div>
+
 
             <div style={{ marginBottom: 24 }}>
               <label style={{ display: 'block', fontSize: 12, color: 'var(--text-dim)', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '0.5px' }}>

@@ -17,10 +17,11 @@ export const isAuthenticated = () => pb.authStore.isValid
 
 export const getUser = () => pb.authStore.model
 
-function generateSlug(name) {
-  const clean = name.toLowerCase().trim().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '')
-  const rand = Math.random().toString(36).substring(2, 6)
-  return `${clean}_${rand}`
+function generateSlug(filename) {
+  // slug = {nombre_sin_ext}_{hash6} — se genera del nombre del archivo, no del input del usuario
+  const nameWithoutExt = filename.replace(/\.[^.]+$/, '').trim().toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '')
+  const hash = Math.random().toString(36).substring(2, 8)
+  return `${nameWithoutExt}_${hash}`
 }
 
 export const saveToken = (token) => localStorage.setItem('pb_token', token)
