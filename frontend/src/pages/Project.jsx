@@ -94,6 +94,8 @@ export default function Project({ user }) {
 
   const sval = (k) => (settings[k] === undefined ? DEF[k] : settings[k])
 
+  const isAsset = project.project_type === 'asset'
+
   const files = project.files || []
   const isImg = (u) => /\.(jpg|jpeg|png|webp)$/i.test(u.split('?')[0])
   const isModel = (u) => /\.(glb|gltf)$/i.test(u.split('?')[0])
@@ -170,30 +172,67 @@ export default function Project({ user }) {
 
           {/* Left: Settings */}
           <div style={{ background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 12, padding: '18px 20px' }}>
-            <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 14 }}>Ajustes de reconstruccion</div>
+            <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 14 }}>
+              {isAsset ? 'Ajustes de asset' : 'Ajustes de reconstruccion'}
+            </div>
 
-            {/* 360 toggle — disabled */}
-            <div style={{
-              display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12,
-              background: 'var(--bg-dark)', border: `1px solid ${sval('full_360') ? 'var(--accent)' : 'var(--border)'}`,
-              borderRadius: 8, padding: '12px 14px',
-              pointerEvents: 'none', opacity: 0.5, cursor: 'default', userSelect: 'none',
-            }}>
-              <span>
-                <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text)' }}>Generacion 360 completa</div>
-                <div style={{ fontSize: 12, color: 'var(--text-dim)', marginTop: 2 }}>
-                  {sval('full_360')
-                    ? 'ON — panorama 360 + multiview + GLB completo'
-                    : 'OFF — solo imagen de frente'}
+            {isAsset ? (
+              /* ── Asset settings: texture toggle ── */
+              <>
+                <div
+                  onClick={async () => {
+                    const newTex = !sval('texture')
+                    const newSettings = { ...settings, texture: newTex }
+                    setSettings(newSettings)
+                    try { await api.updateProjectSettings(project.id, newSettings) } catch (e) { console.error(e) }
+                  }}
+                  style={{
+                    display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12,
+                    background: 'var(--bg-dark)',
+                    border: `1px solid ${sval('texture') ? 'var(--accent)' : 'var(--border)'}`,
+                    borderRadius: 8, padding: '12px 14px', cursor: 'pointer', userSelect: 'none',
+                  }}
+                >
+                  <span>
+                    <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text)' }}>Textura</div>
+                    <div style={{ fontSize: 12, color: 'var(--text-dim)', marginTop: 2 }}>
+                      {sval('texture')
+                        ? 'ON — GLB con colores reales (más lento)'
+                        : 'OFF — solo geometría (más rápido)'}
+                    </div>
+                  </span>
+                  <input type="checkbox" checked={!!sval('texture')} readOnly
+                    style={{ width: 20, height: 20, accentColor: 'var(--accent)', flexShrink: 0 }} />
                 </div>
-              </span>
-              <input type="checkbox" checked={!!sval('full_360')} readOnly
-                style={{ width: 20, height: 20, accentColor: 'var(--accent)', flexShrink: 0 }} />
-            </div>
-
-            <div style={{ marginTop: 12, fontSize: 11, color: 'var(--text-faint)' }}>
-              Calidad máxima · Resolución máxima
-            </div>
+                <div style={{ marginTop: 12, fontSize: 11, color: 'var(--text-faint)' }}>
+                  Hunyuan3D-2 mini-turbo · objeto desde imagen
+                </div>
+              </>
+            ) : (
+              /* ── Space settings: 360 toggle (disabled) ── */
+              <>
+                <div style={{
+                  display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12,
+                  background: 'var(--bg-dark)', border: `1px solid ${sval('full_360') ? 'var(--accent)' : 'var(--border)'}`,
+                  borderRadius: 8, padding: '12px 14px',
+                  pointerEvents: 'none', opacity: 0.5, cursor: 'default', userSelect: 'none',
+                }}>
+                  <span>
+                    <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text)' }}>Generacion 360 completa</div>
+                    <div style={{ fontSize: 12, color: 'var(--text-dim)', marginTop: 2 }}>
+                      {sval('full_360')
+                        ? 'ON — panorama 360 + multiview + GLB completo'
+                        : 'OFF — solo imagen de frente'}
+                    </div>
+                  </span>
+                  <input type="checkbox" checked={!!sval('full_360')} readOnly
+                    style={{ width: 20, height: 20, accentColor: 'var(--accent)', flexShrink: 0 }} />
+                </div>
+                <div style={{ marginTop: 12, fontSize: 11, color: 'var(--text-faint)' }}>
+                  Calidad máxima · Resolución máxima
+                </div>
+              </>
+            )}
           </div>
 
           {/* Right: Output */}
@@ -308,6 +347,8 @@ const DEF = {
   apply_confidence_mask: false,
   save_gs: true,
   save_points: true,
+  // asset settings
+  texture: false,
 }
 
 function GenStatus({ status }) {

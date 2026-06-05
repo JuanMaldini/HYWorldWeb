@@ -32,6 +32,7 @@ import traceback
 import logging
 import math
 import random
+import base64
 from datetime import datetime
 from pathlib import Path
 
@@ -74,6 +75,7 @@ PB_URL         = os.environ.get("PB_URL", "https://pocketbase.vmoliver.cloud").r
 PB_ADMIN_TOKEN = os.environ.get("PB_ADMIN_TOKEN", "")
 COLLECTION     = "hyworld_data"
 POLL_INTERVAL  = int(os.environ.get("POLL_INTERVAL", "10"))
+ASSET_SERVER   = os.environ.get("ASSET_SERVER_URL", "http://host.docker.internal:8081")
 
 # Global pipeline instances (loaded once, reused)
 _PIPELINE_HYPOANO = None   # HunyuanPanoPipeline (loaded on demand)
@@ -965,14 +967,181 @@ def process_ply_input(slug, rid, ply_filename):
 
 
 # ─────────────────────────────────────────────────────────────────────
+# Asset processing — imagen → Hunyuan3D-2 → GLB
+# ─────────────────────────────────────────────────────────────────────
+ASSET_SERVER_MAX_WAIT = 600   # segundos (10 min) antes de timeout
+ASSET_SERVER_POLL_SEC = 8     # intervalo de poll
+
+
+def _asset_server_ready():
+    """Retorna True si el asset server responde en /status/ping (o cualquier endpoint)."""
+    try:
+        r = requests.get(f"{ASSET_SERVER}/status/ping", timeout=5)
+        return True   # 404 también cuenta — el server está up
+    except Exception:
+        return False
+
+
+def process_asset(rec):
+    """Pipeline asset: imagen en PocketBase → Hunyuan3D-2 → GLB → PocketBase."""
+    slug = rec["slug"]
+    orig_filename = get_original_image_name(rec["files"])
+
+    if not orig_filename:
+        log.warning("  [%s] asset: no se encontró imagen de entrada — SKIP" % slug)
+        return
+
+    rid, fresh_rec = pb_get_record_by_slug(slug)
+    if not rid:
+        log.warning("  [%s] asset: no encontrado en PocketBase — SKIP" % slug)
+        return
+
+    # ── Descargar imagen ──────────────────────────────────────────────
+    input_file = input_path_for_slug(slug, orig_filename)
+    if not os.path.exists(input_file) or os.path.getsize(input_file) == 0:
+        url = "%s/api/files/%s/%s/%s" % (PB_URL, COLLECTION, rid, orig_filename)
+        if not download_file(url, input_file):
+            log.error("  [%s] asset: descarga de input FALLO" % slug)
+            set_status(rid, "error")
+            return
+    else:
+        log.info("  [%s] asset: input cacheado: %s" % (slug, input_file))
+
+    # ── Verificar asset server disponible ────────────────────────────
+    if not _asset_server_ready():
+        log.warning("  [%s] asset: Asset Server no disponible en %s — SKIP" % (slug, ASSET_SERVER))
+        return
+
+    # ── Preparar payload ─────────────────────────────────────────────
+    settings = rec.get("settings") or {}
+    enable_tex = bool(settings.get("texture", False))
+
+    with open(input_file, "rb") as f:
+        img_b64 = base64.b64encode(f.read()).decode()
+
+    payload = {
+        "image": img_b64,
+        "texture": enable_tex,
+        "type": "glb",
+        "seed": 1234,
+        "num_inference_steps": 5,
+        "octree_resolution": 128,
+        "guidance_scale": 5.0,
+    }
+
+    # ── Enviar al asset server (async) ───────────────────────────────
+    set_status(rid, "processing")
+    log.info("  [%s] asset: enviando a %s (texture=%s)..." % (slug, ASSET_SERVER, enable_tex))
+    try:
+        r = requests.post("%s/send" % ASSET_SERVER, json=payload, timeout=60)
+        r.raise_for_status()
+        uid = r.json()["uid"]
+        log.info("  [%s] asset: uid=%s — esperando generación..." % (slug, uid))
+    except Exception as e:
+        log.error("  [%s] asset: error al enviar al server: %s" % (slug, e))
+        set_status(rid, "error")
+        return
+
+    # ── Poll hasta completado ─────────────────────────────────────────
+    waited = 0
+    while waited < ASSET_SERVER_MAX_WAIT:
+        time.sleep(ASSET_SERVER_POLL_SEC)
+        waited += ASSET_SERVER_POLL_SEC
+        try:
+            sr = requests.get("%s/status/%s" % (ASSET_SERVER, uid), timeout=30)
+            sr.raise_for_status()
+            data = sr.json()
+        except Exception as e:
+            log.warning("  [%s] asset: poll error: %s" % (slug, e))
+            continue
+
+        status = data.get("status", "")
+        if status == "processing":
+            log.info("  [%s] asset: generando... (%ds)" % (slug, waited))
+            continue
+        elif status == "completed":
+            log.info("  [%s] asset: completado en %ds" % (slug, waited))
+            break
+        else:
+            log.error("  [%s] asset: estado inesperado: %s" % (slug, data))
+            set_status(rid, "error")
+            return
+    else:
+        log.error("  [%s] asset: timeout (%ds) esperando generación" % (slug, ASSET_SERVER_MAX_WAIT))
+        set_status(rid, "error")
+        return
+
+    # ── Decodificar GLB y guardar localmente ─────────────────────────
+    glb_b64 = data.get("model_base64")
+    if not glb_b64:
+        log.error("  [%s] asset: respuesta sin model_base64" % slug)
+        set_status(rid, "error")
+        return
+
+    output_dir = os.path.join(PROJECTS_DIR, slug, "output")
+    os.makedirs(output_dir, exist_ok=True)
+    glb_path = os.path.join(output_dir, "asset.glb")
+
+    try:
+        with open(glb_path, "wb") as f:
+            f.write(base64.b64decode(glb_b64))
+        log.info("  [%s] asset: GLB guardado -> %.2f MB" % (slug, os.path.getsize(glb_path) / 1e6))
+    except Exception as e:
+        log.error("  [%s] asset: error al guardar GLB: %s" % (slug, e))
+        set_status(rid, "error")
+        return
+
+    # ── Subir a PocketBase ────────────────────────────────────────────
+    rid, _ = pb_get_record_by_slug(slug)
+    if not rid:
+        log.error("  [%s] asset: record no encontrado para upload" % slug)
+        return
+    delete_pb_outputs(rid)
+    upload_output(rid, glb_path)
+
+    # ── Marcar completed ──────────────────────────────────────────────
+    rid, _ = pb_get_record_by_slug(slug)
+    if rid:
+        try:
+            current = pb_get("/api/collections/%s/records/%s" % (COLLECTION, rid))
+            parsed = current.get("json") or {}
+            if isinstance(parsed, str):
+                try:
+                    parsed = json.loads(parsed)
+                except Exception:
+                    parsed = {}
+            parsed["status"] = "completed"
+            parsed["regenerate"] = False
+            parsed["finished_at"] = datetime.now().isoformat()
+            pb_patch_json(rid, {"json": parsed})
+            log.info("  [%s] asset: marcado completed" % slug)
+        except Exception as e:
+            log.error("  [%s] asset: no se pudo marcar completed: %s" % (slug, e))
+
+
+# ─────────────────────────────────────────────────────────────────────
 # Process one project
 # ─────────────────────────────────────────────────────────────────────
 def process(rec):
     """Procesa un proyecto completo.
-    - Si input_type='ply': PLY → GLB directo (sin ML)
-    - Si input_type='image': HY-Pano → multiview → WorldMirror → GLB
+    - Si project_type='asset': imagen → Hunyuan3D-2 → GLB (asset 3D de objeto)
+    - Si input_type='ply':     PLY → GLB directo (sin ML)
+    - Si input_type='image':   HY-Pano → multiview → WorldMirror → GLB (espacio 3D)
     """
     slug = rec["slug"]
+
+    # ── Rama Asset: Hunyuan3D-2 ───────────────────────────────────────
+    project_type = rec.get("project_type", "space")
+    if project_type == "asset":
+        if is_built(rec) and not rec.get("regenerate", False):
+            log.info("  [%s] asset YA construido — SKIP" % slug)
+            return
+        if not rec["listo"] and not rec.get("regenerate", False):
+            log.info("  [%s] asset listo=OFF — esperando" % slug)
+            return
+        process_asset(rec)
+        return
+
     input_type = rec.get("input_type", "image")
     ply_filename = get_ply_filename(rec["files"])
     orig_filename = get_original_image_name(rec["files"])
@@ -1169,10 +1338,11 @@ def parse_records(items):
             "name": raw.get("name", it["id"]),
             "listo": bool(raw.get("listo", False)),
             "status": raw.get("status", "pending"),
-            "settings":    raw.get("settings", {}) or {},
-            "regenerate":  bool(raw.get("regenerate", False)),
-            "input_type":  raw.get("input_type", "image"),
-            "files":       it.get("files", []) or [],
+            "settings":      raw.get("settings", {}) or {},
+            "regenerate":    bool(raw.get("regenerate", False)),
+            "input_type":    raw.get("input_type", "image"),
+            "project_type":  raw.get("project_type", "space"),
+            "files":         it.get("files", []) or [],
         })
     return out
 

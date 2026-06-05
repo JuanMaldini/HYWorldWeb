@@ -26,5 +26,14 @@ if not errorlevel 1 (
 
 echo [%time%] [HYWorld] Contenedor detenido.
 echo [%time%] [HYWorld] Contenedor detenido.>> "%STOPLOG%"
+
+:: Matar Asset Server (api_server.py en puerto 8081)
+echo [%time%] [HYWorld] Deteniendo Asset Server (puerto 8081)...
+for /f "tokens=5" %%i in ('netstat -aon ^| findstr ":8081 " ^| findstr "LISTENING"') do (
+    echo [%time%] [HYWorld]   Matando PID %%i>> "%STOPLOG%"
+    taskkill /PID %%i /F >nul 2>&1
+)
+echo [%time%] [HYWorld] Asset Server detenido.
+
 echo [HYWorld] Listo. Para reiniciar: "%REPO%\start.bat"
 timeout /t 3 >nul

@@ -11,6 +11,7 @@ export default function Dashboard({ user, onLogout }) {
   const [files, setFiles] = useState([])
   const [preview, setPreview] = useState(null)
   const [fileType, setFileType] = useState(null) // 'image' | 'ply'
+  const [projectType, setProjectType] = useState(null) // 'space' | 'asset'
   const [creating, setCreating] = useState(false)
   const [error, setError] = useState('')
   const [dragOver, setDragOver] = useState(false)
@@ -55,12 +56,13 @@ export default function Dashboard({ user, onLogout }) {
   }
 
   const handleCreate = async () => {
-    if (files.length === 0) { setError('Se requiere una imagen o archivo .ply'); return }
+    if (!projectType) { setError('Seleccioná Generate Space o Generate Asset'); return }
+    if (files.length === 0) { setError('Se requiere una imagen' + (projectType === 'space' ? ' o archivo .ply' : '')); return }
     setError('')
     setCreating(true)
     try {
       const firstFile = files[0]
-      const record = await api.createProject(firstFile.name, files, fileType === 'ply' ? 'ply' : 'image')
+      const record = await api.createProject(firstFile.name, files, fileType === 'ply' ? 'ply' : 'image', projectType)
       const slug = (() => {
         try {
           const j = typeof record.json === 'string' ? JSON.parse(record.json) : record.json
@@ -84,6 +86,7 @@ export default function Dashboard({ user, onLogout }) {
     setFiles([])
     setPreview(null)
     setFileType(null)
+    setProjectType(null)
     setError('')
   }
 
@@ -215,6 +218,36 @@ export default function Dashboard({ user, onLogout }) {
 
 
 
+            {/* ── Tipo de proyecto ── */}
+            <div style={{ marginBottom: 20 }}>
+              <label style={{ display: 'block', fontSize: 12, color: 'var(--text-dim)', marginBottom: 8, textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+                Tipo <span style={{ color: 'var(--accent)' }}>*</span>
+              </label>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+                {[
+                  { key: 'space', icon: '🌍', label: 'Generate Space', desc: 'Panorama 3D desde imagen' },
+                  { key: 'asset', icon: '🧊', label: 'Generate Asset', desc: 'Objeto 3D desde imagen' },
+                ].map(({ key, icon, label, desc }) => (
+                  <button
+                    key={key}
+                    onClick={() => { setProjectType(key); setFiles([]); setPreview(null); setFileType(null); setError('') }}
+                    style={{
+                      background: projectType === key ? 'var(--surface-2, #1e2a1e)' : 'var(--bg-dark)',
+                      border: `2px solid ${projectType === key ? 'var(--accent)' : 'var(--border)'}`,
+                      borderRadius: 10, padding: '14px 12px', cursor: 'pointer',
+                      textAlign: 'left', transition: 'all 0.15s',
+                    }}
+                  >
+                    <div style={{ fontSize: 22, marginBottom: 4 }}>{icon}</div>
+                    <div style={{ fontSize: 13, fontWeight: 600, color: projectType === key ? 'var(--accent)' : 'var(--text)' }}>{label}</div>
+                    <div style={{ fontSize: 11, color: 'var(--text-faint)', marginTop: 2 }}>{desc}</div>
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* ── Archivo (solo si se eligió tipo) ── */}
+            {projectType && (
             <div style={{ marginBottom: 24 }}>
               <label style={{ display: 'block', fontSize: 12, color: 'var(--text-dim)', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '0.5px' }}>
                 Archivo <span style={{ color: 'var(--accent)' }}>*</span>
@@ -246,7 +279,7 @@ export default function Dashboard({ user, onLogout }) {
                   <input
                     id="fileInput"
                     type="file"
-                    accept="image/*,.ply"
+                    accept={projectType === 'asset' ? 'image/*' : 'image/*,.ply'}
                     onChange={e => handleFileChange(Array.from(e.target.files))}
                     style={{ display: 'none' }}
                   />
@@ -290,6 +323,7 @@ export default function Dashboard({ user, onLogout }) {
                 </div>
               )}
             </div>
+            )} {/* end projectType && */}
 
             <div style={{ display: 'flex', gap: 12, justifyContent: 'flex-end' }}>
               <button
@@ -302,7 +336,7 @@ export default function Dashboard({ user, onLogout }) {
               <button
                 className="btn"
                 onClick={handleCreate}
-                disabled={creating}
+                disabled={creating || !projectType}
               >
                 {creating ? 'Creating...' : 'Create Project'}
               </button>

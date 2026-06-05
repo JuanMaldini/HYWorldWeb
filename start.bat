@@ -90,6 +90,20 @@ if exist "%DATA%\repo\.git" (
 )
 %LOG% "  Repo OK"
 
+:: ── 5b. Sync Hunyuan3D-2 repo ─────────────────────────────
+%LOG% "Sincronizando Hunyuan3D-2..."
+if exist "%DATA%\Hunyuan3D-2\.git" (
+    %LOG% "  git pull Hunyuan3D-2..."
+    git -C "%DATA%\Hunyuan3D-2" pull >>"%LOGFILE%" 2>&1
+) else (
+    %LOG% "  AVISO: %DATA%\Hunyuan3D-2 no encontrado. Clonando..."
+    git clone --depth=1 https://github.com/Tencent-Hunyuan/Hunyuan3D-2 "%DATA%\Hunyuan3D-2" >>"%LOGFILE%" 2>&1
+    %LOG% "  Instalando dependencias Hunyuan3D-2..."
+    python -m pip install -r "%DATA%\Hunyuan3D-2\requirements.txt" >>"%LOGFILE%" 2>&1
+    python -m pip install -e "%DATA%\Hunyuan3D-2" --no-deps >>"%LOGFILE%" 2>&1
+)
+%LOG% "  Hunyuan3D-2 OK"
+
 :: ── 6. Detectar cambios en Dockerfile / requirements.txt ───────
 set "BUILD_TRIGGERfile=%DATA%\build_trigger.txt"
 set "CURRENT_HASH="
@@ -146,6 +160,17 @@ docker ps --filter "name=hyworld_ml" --format "table {{.Names}}\t{{.Status}}\t{{
 %LOG% " CONTENEDOR INICIADO - abriendo ventana de logs"
 %LOG% "=========================================="
 
-:: ── 9. Abrir SOLO la ventana de logs y cerrar esta ────────
+:: ── 9. Iniciar Asset Server (Hunyuan3D-2) en background ───
+set "ASSET_LOG=%DATA%\logs\asset_server.log"
+set "ASSET_SCRIPT=%DATA%\Hunyuan3D-2\api_server.py"
+set "ASSET_SAVE_DIR=%DATA%\projects\asset_cache"
+if not exist "%ASSET_SAVE_DIR%" mkdir "%ASSET_SAVE_DIR%"
+
+%LOG% "Iniciando Asset Server (Hunyuan3D-2) en puerto 8081..."
+:: HF_HOME apunta al volumen compartido — misma carpeta que Docker, sin re-descargas
+start "" /b cmd /c "set HF_HOME=%DATA%\models&&set HUGGINGFACE_HUB_CACHE=%DATA%\models\hub&&set HY3D_SAVE_DIR=%ASSET_SAVE_DIR%&&python "%ASSET_SCRIPT%" --host 0.0.0.0 --port 8081 --enable_tex >>"%ASSET_LOG%" 2>&1"
+%LOG% "  Asset Server iniciado (log: %ASSET_LOG%)"
+
+:: ── 10. Abrir ventana combinada de logs y cerrar esta ──────
 start "HYWorld - Logs" cmd /k "docker logs -f hyworld_ml"
 exit

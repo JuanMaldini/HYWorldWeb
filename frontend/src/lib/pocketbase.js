@@ -59,6 +59,7 @@ export const api = {
         status: parsed.status || 'pending',
         listo: parsed.listo || false,
         settings: parsed.settings || {},
+        project_type: parsed.project_type || 'space',
         created: item.created,
         thumb,
         files: (item.files || []).map(f => `${PB_URL}/api/files/hyworld_data/${item.id}/${f}`),
@@ -66,9 +67,14 @@ export const api = {
     })
   },
 
-  async createProject(name, files, inputType = 'image') {
+  async createProject(name, files, inputType = 'image', projectType = 'space') {
     const slug = generateSlug(name)
-    const jsonData = { name, slug, status: 'pending', listo: false, input_type: inputType, created: new Date().toISOString() }
+    const jsonData = {
+      name, slug, status: 'pending', listo: false,
+      input_type: inputType,
+      project_type: projectType,
+      created: new Date().toISOString(),
+    }
     const formData = new FormData()
     formData.append('json', JSON.stringify(jsonData))
     for (const f of files) formData.append('files', f)
@@ -87,6 +93,7 @@ export const api = {
       status: parsed.status || 'pending',
       listo: parsed.listo || false,
       settings: parsed.settings || {},
+      project_type: parsed.project_type || 'space',
       files: (item.files || []).map(f => `${PB_URL}/api/files/hyworld_data/${item.id}/${f}`),
       created: item.created,
       _raw: item.files || [],
