@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 """
-HYWorld ML Worker — v3
+HYWorld ML Worker — v4
 Full pipeline: HY-Pano 2.0 → multi-view extraction → WorldMirror 2.0 → GLB → PocketBase
 
 Flujo por proyecto:
@@ -11,16 +11,12 @@ Flujo por proyecto:
   5. Upload output to PocketBase (preserve filenames at every stage)
   6. Mark completed
 
-FIXES v3 (over v2):
-  - HY-Pano 2.0 integration (HunyuanPanoPipeline) before WorldMirror
-  - Multi-view extraction from panorama (9 views with overlap)
-  - Filename preservation: original file → projects/<slug>/input/<orig_name>
-      → projects/<slug>/pano/<orig_name>_pano.png
-      → projects/<slug>/multiview/<orig_name>_view_00.png ... _view_08.png
-  - Fresh record ID lookup before every PocketBase operation
-  - Graceful fallback: if HY-Pano fails, use original single image directly
-  - is_built() requires mesh.glb (not just PLY) to mark completed
-  - Never crash: ML errors are caught and logged, project marked error
+FIXES v4 (over v3):
+  - GLB generado desde points.ply via trimesh (sin re-inferencia CUDA)
+    Root cause v3: export_glb_mesh re-ejecutaba inferencia porque
+    predictions_best.pt nunca existe → CUDA CachingAllocator crash
+  - Logging deduplicado: detecta Docker y omite FileHandler si el
+    entrypoint.sh ya redirige stdout al log (evita líneas duplicadas)
 
 Start: python scripts/worker.py
 """
@@ -93,9 +89,16 @@ class _Fmt(logging.Formatter):
 
 log = logging.getLogger("worker")
 log.setLevel(logging.DEBUG)
-_fh = logging.FileHandler(log_file, encoding="utf-8"); _fh.setLevel(logging.DEBUG); _fh.setFormatter(_Fmt())
-_sh = logging.StreamHandler(sys.stdout);               _sh.setLevel(logging.DEBUG); _sh.setFormatter(_Fmt())
-log.handlers = [_fh, _sh]
+_sh = logging.StreamHandler(sys.stdout); _sh.setLevel(logging.DEBUG); _sh.setFormatter(_Fmt())
+# Solo agregar FileHandler si el entrypoint NO está redirigiendo stdout al log.
+# En Docker, entrypoint.sh ya hace `exec > >(tee -a "$LOG_FILE")`, por lo que
+# agregar otro FileHandler al mismo archivo causaría que cada línea aparezca dos veces.
+_IN_DOCKER = os.path.exists("/.dockerenv") or os.environ.get("HYWORLD_DIR", "").startswith("/c/")
+if not _IN_DOCKER:
+    _fh = logging.FileHandler(log_file, encoding="utf-8"); _fh.setLevel(logging.DEBUG); _fh.setFormatter(_Fmt())
+    log.handlers = [_fh, _sh]
+else:
+    log.handlers = [_sh]
 
 dbg_file = os.path.join(LOGS_DIR, "debug_" + datetime.now().strftime("%Y%m%d") + ".log")
 dbg = logging.getLogger("debug")
@@ -117,11 +120,16 @@ def dump_record(rid, tag):
 # ── HuggingFace cache cleanup (on startup — remove *.incomplete garbage) ──
 def _cleanup_hf_cache():
     """Borra archivos *.incomplete en el cache de HuggingFace para evitar
-    que Ocupen espacio inútilmente. Solo elimina los incompletos;
+    que ocupen espacio inútilmente. Solo elimina los incompletos;
     los completos se preservan. Esto permite descargas limpias cuando
-    una descarga anterior fue interrumpida."""
+    una descarga anterior fue interrumpida.
+    Usa HF_HOME si está definido (volumen persistente); si no, fallback al default."""
     try:
-        hf_base = os.path.expanduser(r"~/.cache\huggingface\hub")
+        hf_home = os.environ.get("HF_HOME") or os.environ.get("HUGGINGFACE_HUB_CACHE")
+        if hf_home:
+            hf_base = os.path.join(hf_home, "hub") if not hf_home.endswith("hub") else hf_home
+        else:
+            hf_base = os.path.expanduser(os.path.join("~", ".cache", "huggingface", "hub"))
         if not os.path.isdir(hf_base):
             return
         removed = 0
@@ -299,12 +307,19 @@ def upload_output(record_id, filepath):
 # never invented or generated. This ensures uploads match expected names.
 
 IMG_EXT = (".jpg", ".jpeg", ".png", ".webp")
+PLY_EXT = (".ply",)
 
 def get_original_image_name(files):
-    """Return the original image filename from PocketBase files list.
-    Prefers the first file with an image extension."""
+    """Return the original image filename from PocketBase files list."""
     for f in files:
         if isinstance(f, str) and f.lower().endswith(IMG_EXT):
+            return f
+    return None
+
+def get_ply_filename(files):
+    """Return the .ply filename from PocketBase files list, if any."""
+    for f in files:
+        if isinstance(f, str) and f.lower().endswith(PLY_EXT):
             return f
     return None
 
@@ -642,7 +657,8 @@ def run_ml(slug, settings=None, want_mesh=True):
         if k in ALLOWED and v is not None:
             kwargs[k] = v
 
-    # Max quality settings (override defaults)
+    # Siempre guardar points.ply (necesario para generar GLB después)
+    kwargs["save_points"] = True
     kwargs.setdefault("apply_sky_mask", True)
     kwargs.setdefault("apply_edge_mask", True)
     kwargs.setdefault("max_resolution", 2560)
@@ -663,155 +679,189 @@ def run_ml(slug, settings=None, want_mesh=True):
         log.error("  [%s] run_ml: FALLO: %s\n%s" % (slug, e, traceback.format_exc()))
         return None
 
-    # Guardar cache para export_glb_mesh (sin re-inferencia)
-    try:
-        import torch
-        cache_path = os.path.join(output_dir, "pipeline_cache.json")
-        with open(cache_path, "w") as fh:
-            json.dump({
-                "slug": slug,
-                "views": views,
-                "saved_at": datetime.now().isoformat(),
-            }, fh)
-    except Exception as e:
-        log.warning("  [%s] run_ml: no se pudo guardar cache: %s" % (slug, e))
-
     if want_mesh:
         try:
-            export_glb_mesh(slug, settings)
+            export_glb_from_ply(slug)
         except Exception as e:
-            log.error("  [%s] mesh GLB FALLO: %s" % (slug, e))
+            log.error("  [%s] mesh GLB FALLO: %s\n%s" % (slug, e, traceback.format_exc()))
 
     return output_dir
 
 
-def export_glb_mesh(slug, settings):
-    """Genera mesh.glb usando predictions cacheadas (sin re-inferencia).
-    Si el panorama fue generado, usa las views; si no, usa las imágenes
-    originales del input/."""
+def export_glb_from_ply(slug):
+    """Genera mesh.glb desde depth map + imagen de vista (malla 3D real con colores).
+    Proyecta cada pixel del depth map al espacio 3D usando los intrinsecos de camara,
+    conecta pixeles adyacentes con triangulos filtrando discontinuidades de profundidad.
+    Sin CUDA, sin re-inferencia. Fallback: nube de puntos si faltan depth maps.
+    """
     import numpy as np
-    import torch
-    from hyworld2.worldrecon.hyworldmirror.utils.inference_utils import (
-        prepare_input, compute_adaptive_target_size, compute_sky_mask, compute_filter_mask,
-    )
-    from hyworld2.worldrecon.hyworldmirror.models.utils.geometry import depth_to_world_coords_points
-    from hyworld2.worldrecon.hyworldmirror.utils.visual_util import convert_predictions_to_glb_scene
+    import trimesh
+    import json
 
-    views_dir = os.path.join(PROJECTS_DIR, slug, "views")
-    input_dir  = os.path.join(PROJECTS_DIR, slug, "input")
     output_dir = os.path.join(PROJECTS_DIR, slug, "output")
-    os.makedirs(output_dir, exist_ok=True)
+    views_dir  = os.path.join(PROJECTS_DIR, slug, "views")
+    glb_path   = os.path.join(output_dir, "mesh.glb")
 
-    # Try views first, then fallback to input
-    view_paths = sorted(glob.glob(os.path.join(views_dir, "*.png"))) + \
-                 sorted(glob.glob(os.path.join(views_dir, "*.jpg")))
-    if view_paths:
-        img_paths = view_paths
-        source_desc = "views"
-    else:
-        img_paths, _ = prepare_input(input_dir, target_size=952)
-        source_desc = "input"
+    # --- Buscar depth maps y vistas ---
+    depth_files = sorted(glob.glob(os.path.join(output_dir, "depth", "depth_*.npy")))
+    view_files  = sorted(glob.glob(os.path.join(views_dir, "*.png")) +
+                         glob.glob(os.path.join(views_dir, "*.jpg")))
+    cam_path    = os.path.join(output_dir, "camera_params.json")
 
-    if not img_paths:
-        log.error("  [%s] mesh: sin imagenes (%s)" % (slug, source_desc))
-        return None
+    if not depth_files or not view_files or not os.path.exists(cam_path):
+        log.warning("  [%s] glb: sin depth maps — fallback a nube de puntos" % slug)
+        return _export_glb_pointcloud(slug, glb_path)
 
-    target_size = int((settings or {}).get("target_size", 952))
-    effective = compute_adaptive_target_size(img_paths, target_size)
-    log.info("  [%s] mesh: usando %d imagenes de %s (target=%s)" % (
-        slug, len(img_paths), source_desc, effective))
-
-    # Load predictions from cache
-    cache_path = os.path.join(output_dir, "pipeline_cache.json")
-    use_cache = os.path.exists(cache_path)
-    if use_cache:
-        log.info("  [%s] mesh: usando predictions cacheadas (sin re-inferencia)" % slug)
-        try:
-            pred_path = os.path.join(output_dir, "predictions_best.pt")
-            if os.path.exists(pred_path):
-                predictions = torch.load(pred_path,
-                    map_location="cuda" if torch.cuda.is_available() else "cpu")
-            else:
-                use_cache = False
-                log.warning("  [%s] mesh: predictions_best.pt no existe — re-inferencia" % slug)
-        except Exception as e:
-            use_cache = False
-            log.warning("  [%s] mesh: error cargando cache — re-inferencia: %s" % (slug, e))
-
-    if not use_cache:
-        log.info("  [%s] mesh: re-ejecutando inferencia..." % slug)
-        predictions, imgs, _ = _PIPELINE_WORLD._run_inference(img_paths, effective, None, None)
-
-    # Ensure images exist in views/ (re-download from PocketBase if missing)
-    for ip in img_paths:
-        if not os.path.exists(ip):
-            log.warning("  [%s] mesh: imagen faltante '%s' — re-descargando" % (slug, ip))
-            fname = os.path.basename(ip)
-            rid, _ = pb_get_record_by_slug(slug)
-            if rid:
-                url = "%s/api/files/%s/%s/%s" % (PB_URL, COLLECTION, rid, fname)
-                download_file(url, ip)
-            else:
-                log.error("  [%s] mesh: no se encontro record para re-descarga" % slug)
-
-    # Get imgs from pipeline
     try:
-        imgs = _PIPELINE_WORLD._imgs
-    except Exception:
-        imgs = None
+        with open(cam_path) as f:
+            cam_data = json.load(f)
+    except Exception as e:
+        log.warning("  [%s] glb: camera_params.json no leible (%s) — fallback" % (slug, e))
+        return _export_glb_pointcloud(slug, glb_path)
 
-    if imgs is not None:
-        B, S, C, H, W = imgs.shape
-        H = int(H); W = int(W); S = int(S)
-    else:
-        d = predictions.get("depth")
-        if d is not None:
-            B, S, _, H, W = d.shape[0], d.shape[1], 1, d.shape[2], d.shape[3]
-            H = int(H); W = int(W)
-        else:
-            B, S, C, H, W = 1, len(img_paths), 3, 574, 966
-            H = int(H); W = int(W)
+    log.info("  [%s] glb: reconstruyendo malla desde %d depth map(s)..." % (
+        slug, len(depth_files)))
 
-    sky_mask = compute_sky_mask(
-        img_paths, H, W, S, predictions=predictions, source="auto",
-        model_threshold=0.45, processed_aspect_ratio=W/float(H),
-    )
-    filter_mask, _ = compute_filter_mask(
-        predictions, imgs, img_paths, H, W, S,
-        apply_confidence_mask=False, apply_edge_mask=True, apply_sky_mask=True,
-        confidence_percentile=10.0, edge_normal_threshold=1.0, edge_depth_threshold=0.03,
-        sky_mask=sky_mask, use_gs_depth=("gs_depth" in predictions),
-    )
-
-    imgs_np = imgs[0].permute(0, 2, 3, 1).detach().cpu().numpy() if imgs is not None else None
-    pts3d_np = depth_to_world_coords_points(
-        predictions["depth"][0, ..., 0],
-        predictions["camera_poses"][0],
-        predictions["camera_intrs"][0],
-    )[0].detach().cpu().float().numpy()
-
-    outputs = {
-        "images": imgs_np,
-        "world_points": pts3d_np,
-        "final_mask": filter_mask,
-        "sky_mask": sky_mask,
-        "camera_poses": predictions["camera_poses"][0].detach().cpu().float().numpy(),
-    }
-
-    log.info("  [%s] mesh: construyendo GLB (as_mesh=True)..." % slug)
-    scene = convert_predictions_to_glb_scene(
-        outputs, filter_by_frames="all", show_camera=False,
-        mask_sky_bg=True, mask_ambiguous=True, as_mesh=True,
-    )
-    glb_path = os.path.join(output_dir, "mesh.glb")
-    scene.export(file_obj=glb_path)
-    log.info("  [%s] mesh: GLB -> %s (%.2f MB)" % (slug, glb_path, os.path.getsize(glb_path)/1e6))
     try:
-        del predictions, imgs
-        torch.cuda.empty_cache()
-    except Exception:
-        pass
+        from PIL import Image
+    except ImportError:
+        return _export_glb_pointcloud(slug, glb_path)
+
+    all_verts  = []
+    all_colors = []
+    all_faces  = []
+    total_verts = 0
+
+    for i, (depth_path, view_path) in enumerate(zip(depth_files, view_files)):
+        # Cargar depth (float32, en metros)
+        depth = np.load(depth_path)
+        if depth.ndim == 3:
+            depth = depth[..., 0]
+        depth = depth.astype(np.float32)
+
+        # Submuestreo: step=2 → 4x menos vertices/triangulos, GLB ~7 MB vs 28 MB
+        STEP = 2
+        depth = depth[::STEP, ::STEP]
+
+        img = np.array(Image.open(view_path).convert("RGB"))
+        if img.shape[:2] != depth.shape:
+            img = np.array(Image.fromarray(img).resize(
+                (depth.shape[1], depth.shape[0]), Image.BILINEAR))
+
+        H, W = depth.shape
+
+        # Intrínsecos de cámara (ajustados al submuestreo)
+        ci   = min(i, len(cam_data["intrinsics"]) - 1)
+        intr = cam_data["intrinsics"][ci]["matrix"]
+        fx, fy = float(intr[0][0]) / STEP, float(intr[1][1]) / STEP
+        cx, cy = float(intr[0][2]) / STEP, float(intr[1][2]) / STEP
+
+        # Extrinsecos (world-to-camera 4x4)
+        ei   = min(i, len(cam_data["extrinsics"]) - 1)
+        E    = np.array(cam_data["extrinsics"][ei]["matrix"], dtype=np.float64)
+        R, t = E[:3, :3], E[:3, 3]
+        # camera-to-world: p_world = R^T*(p_cam - t)
+        Rt   = R.T
+
+        # Desproyectar pixeles a espacio de camara
+        ys, xs = np.mgrid[0:H, 0:W]
+        Z = depth
+        X = (xs - cx) * Z / fx
+        Y = (ys - cy) * Z / fy
+
+        # Transformar a espacio mundo (vectorizado)
+        pts_cam = np.stack([X, Y, Z], axis=-1).reshape(-1, 3)
+        pts_world = (pts_cam - t) @ Rt  # (N, 3)
+
+        # Mascara de pixeles validos (profundidad en rango razonable)
+        valid_2d = (Z > 0.05) & (Z < 100.0)
+        valid_flat = valid_2d.ravel()
+
+        # Mapa de indice de vertice por pixel
+        idx_grid = np.full(H * W, -1, dtype=np.int32)
+        idx_grid[valid_flat] = np.arange(int(valid_flat.sum()), dtype=np.int32) + total_verts
+        idx_grid = idx_grid.reshape(H, W)
+
+        # Crear triangulos vectorizado (quad → 2 triangulos por pixel)
+        yy, xx = np.mgrid[0:H-1, 0:W-1]
+        v00 = idx_grid[yy,   xx  ]
+        v10 = idx_grid[yy+1, xx  ]
+        v01 = idx_grid[yy,   xx+1]
+        v11 = idx_grid[yy+1, xx+1]
+
+        # Filtrar "flying triangles": descartar quads con salto de profundidad grande
+        Z00 = Z[yy,   xx  ]
+        Z10 = Z[yy+1, xx  ]
+        Z01 = Z[yy,   xx+1]
+        Z11 = Z[yy+1, xx+1]
+        # Umbral: max 15% del valor de profundidad o 0.1m (el mayor)
+        ref1  = np.maximum(np.maximum(Z00, Z10), Z01)
+        thr1  = np.maximum(ref1 * 0.15, 0.1)
+        ok1   = ((v00 >= 0) & (v10 >= 0) & (v01 >= 0) &
+                 (np.abs(Z00-Z10) < thr1) & (np.abs(Z00-Z01) < thr1) & (np.abs(Z10-Z01) < thr1))
+        ref2  = np.maximum(np.maximum(Z10, Z11), Z01)
+        thr2  = np.maximum(ref2 * 0.15, 0.1)
+        ok2   = ((v10 >= 0) & (v11 >= 0) & (v01 >= 0) &
+                 (np.abs(Z10-Z11) < thr2) & (np.abs(Z10-Z01) < thr2) & (np.abs(Z11-Z01) < thr2))
+
+        tri1 = np.stack([v00[ok1], v10[ok1], v01[ok1]], axis=1)
+        tri2 = np.stack([v10[ok2], v11[ok2], v01[ok2]], axis=1)
+
+        verts  = pts_world[valid_flat].astype(np.float32)
+        colors = img.reshape(-1, 3)[valid_flat]
+
+        all_verts.append(verts)
+        all_colors.append(colors)
+        if tri1.shape[0]: all_faces.append(tri1)
+        if tri2.shape[0]: all_faces.append(tri2)
+        total_verts += len(verts)
+
+        log.info("  [%s] glb: vista %d → %d verts | %d tris" % (
+            slug, i, len(verts), tri1.shape[0] + tri2.shape[0]))
+
+    if not all_verts:
+        log.error("  [%s] glb: sin vertices" % slug)
+        return _export_glb_pointcloud(slug, glb_path)
+
+    vertices = np.concatenate(all_verts)
+    colors   = np.concatenate(all_colors)
+    faces    = np.concatenate(all_faces) if all_faces else np.zeros((0, 3), dtype=np.int32)
+
+    colors_rgba = np.concatenate(
+        [colors, np.full((len(colors), 1), 255, dtype=np.uint8)], axis=1)
+
+    try:
+        mesh = trimesh.Trimesh(vertices=vertices, faces=faces,
+                               vertex_colors=colors_rgba, process=False)
+        mesh.export(glb_path)
+    except Exception as e:
+        log.error("  [%s] glb: export trimesh fallo: %s — fallback" % (slug, e))
+        return _export_glb_pointcloud(slug, glb_path)
+
+    if not os.path.exists(glb_path) or os.path.getsize(glb_path) == 0:
+        return _export_glb_pointcloud(slug, glb_path)
+
+    log.info("  [%s] glb: mesh.glb generado — %d verts | %d tris | %.2f MB" % (
+        slug, len(vertices), len(faces), os.path.getsize(glb_path) / 1e6))
     return glb_path
+
+
+def _export_glb_pointcloud(slug, glb_path):
+    """Fallback: exporta points.ply como nube de puntos GLB."""
+    import trimesh
+    ply_path = os.path.join(PROJECTS_DIR, slug, "output", "points.ply")
+    if not os.path.exists(ply_path):
+        log.error("  [%s] glb: points.ply no existe" % slug)
+        return None
+    try:
+        cloud = trimesh.load(ply_path, process=False)
+        cloud.export(glb_path)
+        log.info("  [%s] glb: fallback nube de puntos (%.2f MB)" % (
+            slug, os.path.getsize(glb_path) / 1e6))
+        return glb_path
+    except Exception as e:
+        log.error("  [%s] glb: fallback fallo: %s" % (slug, e))
+        return None
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -875,24 +925,114 @@ def is_built(rec):
 
 
 # ─────────────────────────────────────────────────────────────────────
+# PLY → GLB direct conversion (sin ML, sin inferencia)
+# ─────────────────────────────────────────────────────────────────────
+def process_ply_input(slug, rid, ply_filename):
+    """Descarga el .ply, lo convierte a .glb con trimesh y sube el resultado.
+    No requiere GPU ni modelos — conversión directa de nube de puntos a mesh."""
+    import trimesh
+
+    input_file = os.path.join(PROJECTS_DIR, slug, "input", ply_filename)
+    output_dir = os.path.join(PROJECTS_DIR, slug, "output")
+    os.makedirs(os.path.join(PROJECTS_DIR, slug, "input"), exist_ok=True)
+    os.makedirs(output_dir, exist_ok=True)
+    glb_path = os.path.join(output_dir, "mesh.glb")
+
+    # Descargar .ply si no está cacheado
+    if not os.path.exists(input_file) or os.path.getsize(input_file) == 0:
+        url = "%s/api/files/%s/%s/%s" % (PB_URL, COLLECTION, rid, ply_filename)
+        log.info("  [%s] ply: descargando %s..." % (slug, ply_filename))
+        if not download_file(url, input_file):
+            log.error("  [%s] ply: descarga fallida" % slug)
+            return False
+    else:
+        log.info("  [%s] ply: cacheado -> %s" % (slug, input_file))
+
+    log.info("  [%s] ply: convirtiendo a GLB..." % slug)
+    try:
+        mesh = trimesh.load(input_file, process=False)
+        # Si es una escena con múltiples geometrías, combinar
+        if isinstance(mesh, trimesh.Scene):
+            mesh = mesh.to_mesh() if hasattr(mesh, 'to_mesh') else trimesh.util.concatenate(
+                [g for g in mesh.geometry.values()])
+        mesh.export(glb_path)
+        size_mb = os.path.getsize(glb_path) / 1e6
+        log.info("  [%s] ply: GLB generado -> %.2f MB" % (slug, size_mb))
+        return True
+    except Exception as e:
+        log.error("  [%s] ply: conversion FALLO: %s\n%s" % (slug, e, traceback.format_exc()))
+        return False
+
+
+# ─────────────────────────────────────────────────────────────────────
 # Process one project
 # ─────────────────────────────────────────────────────────────────────
 def process(rec):
-    """Procesa un proyecto completo: HY-Pano → multiview → WorldMirror → upload."""
+    """Procesa un proyecto completo.
+    - Si input_type='ply': PLY → GLB directo (sin ML)
+    - Si input_type='image': HY-Pano → multiview → WorldMirror → GLB
+    """
     slug = rec["slug"]
+    input_type = rec.get("input_type", "image")
+    ply_filename = get_ply_filename(rec["files"])
     orig_filename = get_original_image_name(rec["files"])
 
-    log.info("[%s] process: listo=%s status=%s files=%d orig=%s" % (
-        slug, rec["listo"], rec["status"], len(rec["files"]), orig_filename))
+    # Detectar automáticamente por extensión si input_type no está seteado
+    if ply_filename and input_type != "image":
+        input_type = "ply"
 
-    if not orig_filename:
-        log.warning("  [%s] no se encontro imagen de entrada — SKIP" % slug)
-        return
+    log.info("[%s] process: listo=%s status=%s files=%d input_type=%s" % (
+        slug, rec["listo"], rec["status"], len(rec["files"]), input_type))
 
-    # Fresh record ID lookup (detecta projects re-creados)
+    # Fresh record ID lookup
     rid, fresh_rec = pb_get_record_by_slug(slug)
     if not rid:
         log.warning("  [%s] no encontrado en PocketBase — SKIP" % slug)
+        return
+
+    # ── Rama PLY: conversión directa sin ML ──────────────────────────
+    if input_type == "ply":
+        if not ply_filename:
+            log.warning("  [%s] input_type=ply pero no hay .ply en files — SKIP" % slug)
+            return
+        if is_built(rec) and not rec.get("regenerate", False):
+            log.info("  [%s] YA construido — SKIP" % slug)
+            return
+        if not rec["listo"] and not rec.get("regenerate", False):
+            log.info("  [%s] listo=OFF — esperando" % slug)
+            return
+
+        set_status(rid, "processing")
+        ok = process_ply_input(slug, rid, ply_filename)
+        if not ok:
+            set_status(rid, "error")
+            return
+
+        # Upload GLB
+        glb_path = os.path.join(PROJECTS_DIR, slug, "output", "mesh.glb")
+        rid, _ = pb_get_record_by_slug(slug)
+        if rid and os.path.exists(glb_path):
+            delete_pb_outputs(rid)
+            upload_output(rid, glb_path)
+            # Mark completed
+            try:
+                current = pb_get("/api/collections/%s/records/%s" % (COLLECTION, rid))
+                parsed = current.get("json") or {}
+                if isinstance(parsed, str):
+                    try: parsed = json.loads(parsed)
+                    except: parsed = {}
+                parsed["status"] = "completed"
+                parsed["regenerate"] = False
+                parsed["finished_at"] = datetime.now().isoformat()
+                pb_patch_json(rid, {"json": parsed})
+                log.info("  [%s] PLY→GLB completado" % slug)
+            except Exception as e:
+                log.error("  [%s] no se pudo marcar completed: %s" % (slug, e))
+        return
+
+    # ── Rama imagen: pipeline completo ───────────────────────────────
+    if not orig_filename:
+        log.warning("  [%s] no se encontro imagen de entrada — SKIP" % slug)
         return
 
     dump_record(rid, "process_start[%s]" % slug)
@@ -1029,9 +1169,10 @@ def parse_records(items):
             "name": raw.get("name", it["id"]),
             "listo": bool(raw.get("listo", False)),
             "status": raw.get("status", "pending"),
-            "settings": raw.get("settings", {}) or {},
-            "regenerate": bool(raw.get("regenerate", False)),
-            "files": it.get("files", []) or [],
+            "settings":    raw.get("settings", {}) or {},
+            "regenerate":  bool(raw.get("regenerate", False)),
+            "input_type":  raw.get("input_type", "image"),
+            "files":       it.get("files", []) or [],
         })
     return out
 
@@ -1054,12 +1195,9 @@ def _clean_empty_files(folder):
     return removed
 
 def reconcile(recs):
-    """Sincroniza PocketBase ↔ local filesystem.
-    - Borra carpetas huerfanas (no existen en PocketBase).
-    - Proyectos activos (listo=true, o modificados hace <10 min) se preservan.
-    - Limpia archivos de 0 bytes.
-    - Auto-repara 'completed' sin mesh.glb → 'pending'."""
-    valid = {r["slug"] for r in recs}
+    """Sincroniza PocketBase con filesystem local.
+    Borra carpetas huerfanas, limpia 0-bytes, auto-repara completed sin mesh."""
+    valid  = {r["slug"] for r in recs}
     active = {r["slug"] for r in recs if r["listo"]}
 
     if recs and os.path.isdir(PROJECTS_DIR):
@@ -1075,7 +1213,7 @@ def reconcile(recs):
             except Exception:
                 age = 1e9
             if age < 600:
-                log.debug("Reconcile: %s huerfana pero reciente (%.0fs) — se conserva" % (name, age))
+                log.debug("Reconcile: %s huerfana reciente (%.0fs) — conservada" % (name, age))
                 continue
             try:
                 shutil.rmtree(path, ignore_errors=True)
@@ -1083,25 +1221,24 @@ def reconcile(recs):
             except Exception as e:
                 log.warning("Reconcile: no se pudo borrar %s: %s" % (name, e))
 
-    # Por proyecto: asegurar estructura + limpiar 0-bytes
     for r in recs:
         proj = os.path.join(PROJECTS_DIR, r["slug"])
-        os.makedirs(os.path.join(proj, "input"), exist_ok=True)
+        os.makedirs(os.path.join(proj, "input"),  exist_ok=True)
         os.makedirs(os.path.join(proj, "output"), exist_ok=True)
-        os.makedirs(os.path.join(proj, "pano"), exist_ok=True)
-        os.makedirs(os.path.join(proj, "views"), exist_ok=True)
+        os.makedirs(os.path.join(proj, "pano"),   exist_ok=True)
+        os.makedirs(os.path.join(proj, "views"),  exist_ok=True)
         n = _clean_empty_files(proj)
         if n:
             log.info("Reconcile: [%s] %d archivo(s) 0-byte eliminados" % (r["slug"], n))
 
-        # Auto-repair: completed without mesh
+        # Auto-repair: completed sin mesh → pending
         if r["status"] == "completed" and not mesh_glb_exists(r["slug"]):
             pb_has_glb = any(str(f).lower().endswith(".glb") for f in r["files"])
             if not pb_has_glb:
                 rid, _ = pb_get_record_by_slug(r["slug"])
                 if rid:
                     set_status(rid, "pending")
-                    log.info("Reconcile: [%s] 'completed' sin mesh → 'pending'" % r["slug"])
+                    log.info("Reconcile: [%s] completed sin mesh → pending" % r["slug"])
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -1114,26 +1251,27 @@ def main():
     cycle = 0
     while True:
         cycle += 1
+        t0 = time.time()
+        log.info("--- ciclo %d | %s ---" % (cycle, datetime.now().strftime("%H:%M:%S")))
         try:
-            log.info("--- ciclo %d | %s ---" % (cycle, datetime.now().strftime("%H:%M:%S")))
-            data = pb_get("/api/collections/%s/records?perPage=500&sort=-created" % COLLECTION)
-            recs = parse_records(data.get("items", []))
+            data = pb_get("/api/collections/%s/records?perPage=200" % COLLECTION)
+            items = data.get("items", [])
+            recs  = parse_records(items)
             log.info("%d proyecto(s) en PocketBase" % len(recs))
             reconcile(recs)
             for rec in recs:
                 try:
                     process(rec)
                 except Exception as e:
-                    log.error("  [%s] process Exception: %s\n%s" % (
-                        rec["slug"], e, traceback.format_exc()))
-            log.info("ciclo %d ok. durmiendo %ss..." % (cycle, POLL_INTERVAL))
+                    log.error("process(%s) excepcion: %s\n%s" % (
+                        rec.get("slug","?"), e, traceback.format_exc()))
         except Exception as e:
-            log.error("ciclo %d ERROR: %s" % (cycle, e))
-        time.sleep(POLL_INTERVAL)
+            log.error("ciclo %d error: %s" % (cycle, e))
+
+        elapsed = time.time() - t0
+        log.info("ciclo %d ok. durmiendo %ss..." % (cycle, POLL_INTERVAL))
+        time.sleep(max(0, POLL_INTERVAL - elapsed))
 
 
 if __name__ == "__main__":
-    try:
-        main()
-    except KeyboardInterrupt:
-        log.info("Worker detenido.")
+    main()

@@ -66,9 +66,9 @@ export const api = {
     })
   },
 
-  async createProject(name, files) {
+  async createProject(name, files, inputType = 'image') {
     const slug = generateSlug(name)
-    const jsonData = { name, slug, status: 'pending', listo: false, created: new Date().toISOString() }
+    const jsonData = { name, slug, status: 'pending', listo: false, input_type: inputType, created: new Date().toISOString() }
     const formData = new FormData()
     formData.append('json', JSON.stringify(jsonData))
     for (const f of files) formData.append('files', f)
@@ -175,6 +175,14 @@ export const api = {
 
   async deleteProject(id) {
     return pbFetch(`/api/collections/hyworld_data/records/${id}`, { method: 'DELETE' })
+  },
+
+  async deleteFile(id, filename) {
+    // PocketBase: send "files-": [filename] to remove a specific file from the files field
+    return pbFetch(`/api/collections/hyworld_data/records/${id}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ 'files-': [filename] }),
+    })
   },
 
   fileUrl(recordId, filename) {

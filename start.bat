@@ -101,13 +101,13 @@ for %%F in ("%REPO%\Dockerfile" "%REPO%\requirements.txt") do (
 if not exist "%BUILD_TRIGGERfile%" (
     set "NEED_REBUILD=1"
 ) else (
-    set /p PREV_HASH=<"%BUILD_TRIGGERfile%"
+    for /f "usebackq tokens=*" %%H in ("%BUILD_TRIGGERfile%") do set "PREV_HASH=%%H"
     if "!CURRENT_HASH!" neq "!PREV_HASH!" set "NEED_REBUILD=1"
 )
 if defined NEED_REBUILD (
     %LOG% "  Archivos de build detectados como nuevos/modificados — forzando rebuild"
     docker rmi hyworld_ml:latest -f >nul 2>&1
-    echo !CURRENT_HASH! > "%BUILD_TRIGGERfile%"
+    powershell -NoProfile -Command "[IO.File]::WriteAllText('%BUILD_TRIGGERfile%', '!CURRENT_HASH!')"
 ) else (
     %LOG% "  Build cache: OK"
 )
@@ -123,10 +123,6 @@ if errorlevel 1 (
         pause
         exit /b 1
     )
-    %LOG% "  Imagen construida OK"
-) else (
-    %LOG% "  Imagen OK (existe)"
-)
     %LOG% "  Imagen construida OK"
 ) else (
     %LOG% "  Imagen OK (existe)"

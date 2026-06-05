@@ -13,6 +13,11 @@ LOGS_DIR="$HYWORLD_DATA/logs"
 MODELS_DIR="$HYWORLD_DATA/models"
 ENV_FILE="$HYWORLD_DATA/.env"
 
+# Apuntar HuggingFace al volumen persistente (evita re-descarga en cada arranque)
+export HF_HOME="$MODELS_DIR"
+export HUGGINGFACE_HUB_CACHE="$MODELS_DIR/hub"
+export TRANSFORMERS_CACHE="$MODELS_DIR/hub"
+
 # ── Crear estructura de carpetas ───────────────────────────
 echo "[HYWorld] Init: creando estructura..."
 mkdir -p "$PROJECTS_DIR" "$LOGS_DIR" "$MODELS_DIR"
@@ -35,9 +40,10 @@ print(f'GPU: {torch.cuda.get_device_name(0)}')
 "
 
 # ── Limpiar cache HuggingFace (archivos incompletos) ────────
-HF_CACHE_ROOT="$HOME/.cache/huggingface/hub"
+# Usar HF_HOME (ya seteado arriba) como raíz del cache
+HF_CACHE_ROOT="$HF_HOME/hub"
 if [ -d "$HF_CACHE_ROOT" ]; then
-    echo "[HYWorld] Limpiando archivos incompletos del cache HF..."
+    echo "[HYWorld] Limpiando archivos incompletos del cache HF en $HF_CACHE_ROOT..."
     find "$HF_CACHE_ROOT" -name "*.incomplete" -delete 2>/dev/null || true
     find "$HF_CACHE_ROOT" -name "*.lock" -delete 2>/dev/null || true
 fi

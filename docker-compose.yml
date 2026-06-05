@@ -31,6 +31,10 @@ services:
       - PROJECTS_DIR=/c/HyWorldWebData/projects
       - LOGS_DIR=/c/HyWorldWebData/logs
       - PYTHONPATH=/c/HyWorldWebData/repo/hyworld2/panogen:/c/HyWorldWebData/repo
+      # Modelos HuggingFace → volumen persistente (evita re-descarga en cada arranque)
+      - HF_HOME=/c/HyWorldWebData/models
+      - HUGGINGFACE_HUB_CACHE=/c/HyWorldWebData/models/hub
+      - TRANSFORMERS_CACHE=/c/HyWorldWebData/models/hub
     healthcheck:
       test: ["CMD", "python3.11", "-c", "import torch; assert torch.cuda.is_available()"]
       interval: 30s

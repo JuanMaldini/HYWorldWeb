@@ -17,7 +17,7 @@ if not exist "frontend\node_modules" (
 )
 
 echo [HYWorld] Iniciando frontend (Vite) en http://localhost:5173 ...
-start "HYWorld Web" cmd /c "cd /d D:\GitHub\HYWorldWeb\frontend && pnpm run dev > ..\logs\vite.log 2>&1"
+start "HYWorld Web" cmd /k "cd /d D:\GitHub\HYWorldWeb\frontend && pnpm run dev"
 
 echo [HYWorld] Esperando a Vite...
 for /L %%i in (1,1,30) do (

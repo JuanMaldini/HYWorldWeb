@@ -10,6 +10,7 @@ export default function Dashboard({ user, onLogout }) {
   const [deleteTarget, setDeleteTarget] = useState(null)
   const [files, setFiles] = useState([])
   const [preview, setPreview] = useState(null)
+  const [fileType, setFileType] = useState(null) // 'image' | 'ply'
   const [creating, setCreating] = useState(false)
   const [error, setError] = useState('')
   const [dragOver, setDragOver] = useState(false)
@@ -35,25 +36,31 @@ export default function Dashboard({ user, onLogout }) {
 
   const handleFileChange = (selected) => {
     if (!selected.length) return
+    const f = selected[0]
+    const isPly = f.name.toLowerCase().endsWith('.ply')
     setFiles(selected)
-    setPreview(URL.createObjectURL(selected[0]))
+    setFileType(isPly ? 'ply' : 'image')
+    setPreview(isPly ? null : URL.createObjectURL(f))
     setError('')
   }
 
   const handleDrop = (e) => {
     e.preventDefault()
     setDragOver(false)
-    const selected = Array.from(e.dataTransfer.files).filter(f => f.type.startsWith('image/'))
+    const all = Array.from(e.dataTransfer.files)
+    const selected = all.filter(f =>
+      f.type.startsWith('image/') || f.name.toLowerCase().endsWith('.ply')
+    )
     handleFileChange(selected)
   }
 
   const handleCreate = async () => {
-    if (files.length === 0) { setError('At least one cover image is required'); return }
+    if (files.length === 0) { setError('Se requiere una imagen o archivo .ply'); return }
     setError('')
     setCreating(true)
     try {
       const firstFile = files[0]
-      const record = await api.createProject(firstFile.name, files)
+      const record = await api.createProject(firstFile.name, files, fileType === 'ply' ? 'ply' : 'image')
       const slug = (() => {
         try {
           const j = typeof record.json === 'string' ? JSON.parse(record.json) : record.json
@@ -76,6 +83,7 @@ export default function Dashboard({ user, onLogout }) {
     setShowModal(false)
     setFiles([])
     setPreview(null)
+    setFileType(null)
     setError('')
   }
 
@@ -209,10 +217,10 @@ export default function Dashboard({ user, onLogout }) {
 
             <div style={{ marginBottom: 24 }}>
               <label style={{ display: 'block', fontSize: 12, color: 'var(--text-dim)', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '0.5px' }}>
-                Cover Image <span style={{ color: 'var(--accent)' }}>*</span>
+                Archivo <span style={{ color: 'var(--accent)' }}>*</span>
               </label>
 
-              {!preview ? (
+              {!files.length ? (
                 <div
                   onDragOver={e => { e.preventDefault(); setDragOver(true) }}
                   onDragLeave={() => setDragOver(false)}
@@ -228,32 +236,57 @@ export default function Dashboard({ user, onLogout }) {
                     transition: 'all 0.2s',
                   }}
                 >
-                  <div style={{ fontSize: 32, marginBottom: 8 }}>📷</div>
+                  <div style={{ fontSize: 32, marginBottom: 8 }}>📁</div>
                   <div style={{ fontSize: 13, color: 'var(--text-dim)' }}>
-                    Drag & drop or <span style={{ color: 'var(--accent)' }}>browse</span>
+                    Drag & drop o <span style={{ color: 'var(--accent)' }}>seleccionar</span>
                   </div>
-                  <div style={{ fontSize: 11, color: 'var(--text-faint)', marginTop: 4 }}>PNG, JPG, WEBP — 1 image minimum</div>
+                  <div style={{ fontSize: 11, color: 'var(--text-faint)', marginTop: 4 }}>
+                    Imagen (PNG, JPG, WEBP) · o nube de puntos (.ply)
+                  </div>
                   <input
                     id="fileInput"
                     type="file"
-                    accept="image/*"
-                    multiple
+                    accept="image/*,.ply"
                     onChange={e => handleFileChange(Array.from(e.target.files))}
                     style={{ display: 'none' }}
                   />
                 </div>
+              ) : fileType === 'ply' ? (
+                /* PLY selected — show filename chip */
+                <div style={{
+                  display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                  background: 'var(--bg-dark)', border: '1px solid var(--accent)',
+                  borderRadius: 10, padding: '14px 18px',
+                }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                    <span style={{ fontSize: 22 }}>🗂</span>
+                    <div>
+                      <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text)', fontFamily: 'monospace' }}>
+                        {files[0].name}
+                      </div>
+                      <div style={{ fontSize: 11, color: 'var(--text-dim)', marginTop: 2 }}>
+                        {(files[0].size / 1e6).toFixed(1)} MB · nube de puntos
+                      </div>
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => { setFiles([]); setFileType(null) }}
+                    style={{ background: 'none', border: '1px solid var(--border)', borderRadius: 6, color: 'var(--text-dim)', cursor: 'pointer', padding: '4px 10px', fontSize: 12 }}
+                  >Quitar</button>
+                </div>
               ) : (
+                /* Image selected — show preview */
                 <div style={{ position: 'relative' }}>
                   <img src={preview} alt="preview" style={{ width: '100%', height: 180, objectFit: 'cover', borderRadius: 8 }} />
                   <button
-                    onClick={() => { setFiles([]); setPreview(null) }}
+                    onClick={() => { setFiles([]); setPreview(null); setFileType(null) }}
                     style={{
                       position: 'absolute', top: 8, right: 8,
                       background: 'var(--bg-dark)', border: '1px solid var(--border)',
                       borderRadius: 6, color: 'var(--text-dim)', cursor: 'pointer',
                       padding: '4px 8px', fontSize: 12,
                     }}
-                  >Remove</button>
+                  >Quitar</button>
                 </div>
               )}
             </div>
