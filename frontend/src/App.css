@@ -140,6 +140,41 @@ code { font-family: 'JetBrains Mono', ui-monospace, monospace; }
 .topbar-logo span { color: var(--accent-light); }
 .topbar-user { color: var(--text-dim); font-size: 13px; }
 
+/* ─── Hero banner ─────────────────────────────────────────── */
+.hero-banner {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 14px 18px;
+  margin-bottom: 28px;
+  flex-wrap: wrap;
+}
+.hero-icon { font-size: 28px; flex-shrink: 0; }
+.hero-text {
+  flex: 1;
+  font-size: 13px;
+  color: var(--text-dim);
+  line-height: 1.5;
+  min-width: 0;
+}
+.hero-text strong { color: var(--accent); }
+.hero-link {
+  flex-shrink: 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--accent);
+  text-decoration: none;
+  padding: 5px 12px;
+  border: 1px solid var(--accent);
+  border-radius: 7px;
+  transition: all .15s;
+  white-space: nowrap;
+}
+.hero-link:hover { background: var(--accent); color: var(--bg-dark); }
+
 /* ─── Container / Dashboard ──────────────────────────────── */
 .container { max-width: 1180px; margin: 0 auto; padding: 36px 28px; }
 .dashboard-header {

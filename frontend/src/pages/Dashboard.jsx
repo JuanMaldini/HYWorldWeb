@@ -132,6 +132,23 @@ export default function Dashboard({ user, onLogout, onLogin }) {
       </div>
 
       <div className="container">
+        {/* Hero */}
+        <div className="hero-banner">
+          <div className="hero-icon">🌍</div>
+          <div className="hero-text">
+            <strong>HYWorld</strong> — Reconstruction 3D desde una imagen o nube de puntos.
+            Genera espacios panorámicos o assets digitales en segundos.
+          </div>
+          <a
+            href="https://github.com/Tencent-Hunyuan/HY-World-2.0"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="hero-link"
+          >
+            🔗 GitHub
+          </a>
+        </div>
+
         <div className="dashboard-header">
           <h1>Projects</h1>
           {user && (
