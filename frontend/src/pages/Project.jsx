@@ -88,7 +88,7 @@ export default function Project({ user }) {
     <div style={{ color: 'var(--text)', padding: 40, textAlign: 'center' }}>
       <div style={{ fontSize: 32, marginBottom: 16 }}>❌</div>
       <div>Project not found</div>
-      <Link to="/dashboard" style={{ color: 'var(--accent)', display: 'block', marginTop: 16 }}>← Back</Link>
+      <Link to="/" style={{ color: 'var(--accent)', display: 'block', marginTop: 16 }}>← Back</Link>
     </div>
   )
 
@@ -106,14 +106,16 @@ export default function Project({ user }) {
     <div>
       {/* Topbar */}
       <div className="topbar" style={{ height: 56 }}>
-        <Link to="/dashboard" style={{ color: 'var(--accent)', fontSize: 20, textDecoration: 'none' }}>←</Link>
+        <Link to="/" style={{ color: 'var(--accent)', fontSize: 20, textDecoration: 'none' }}>←</Link>
         <h1 style={{ fontSize: 16, fontWeight: 600, flex: 1 }}>{project.name}</h1>
         <span className={`status status-${project.status}`}>{project.status}</span>
-        <button className="btn" onClick={handleGenerate}
-          disabled={gen || project.status === 'processing' || project.status === 'pending'}
-          style={{ marginLeft: 12 }}>
-          {gen ? 'Enviando...' : project.status === 'processing' ? 'Generando...' : project.status === 'pending' ? 'En espera...' : 'Generate'}
-        </button>
+        {user && (
+          <button className="btn" onClick={handleGenerate}
+            disabled={gen || project.status === 'processing' || project.status === 'pending'}
+            style={{ marginLeft: 12 }}>
+            {gen ? 'Enviando...' : project.status === 'processing' ? 'Generando...' : project.status === 'pending' ? 'En espera...' : 'Generate'}
+          </button>
+        )}
       </div>
 
       <div style={{ padding: '20px 40px', maxWidth: 1100, margin: '0 auto' }}>
@@ -132,36 +134,35 @@ export default function Project({ user }) {
                 /p/{project.slug}
               </code>
             </span>
-            <span style={{ fontSize: 12, color: 'var(--text-faint)' }}>
-              {new Date(project.created).toLocaleDateString()}
-            </span>
           </div>
 
-          {/* Listo toggle inline */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0 }}>
-            <span style={{ fontSize: 12, color: 'var(--text-dim)', whiteSpace: 'nowrap' }}>
-              {project.listo ? '✅ Listo para procesar' : '⏳ En espera'}
-            </span>
-            <button
-              onClick={toggleListo}
-              disabled={updating}
-              style={{
-                background: project.listo ? '#1d2b1a' : 'var(--bg-dark)',
-                border: `1px solid ${project.listo ? 'var(--success)' : 'var(--border)'}`,
-                borderRadius: 7,
-                padding: '6px 18px',
-                fontSize: 12,
-                fontWeight: 600,
-                color: project.listo ? 'var(--success)' : 'var(--text-dim)',
-                cursor: updating ? 'not-allowed' : 'pointer',
-                opacity: updating ? 0.6 : 1,
-                transition: 'all 0.2s',
-                whiteSpace: 'nowrap',
-              }}
-            >
-              {updating ? '...' : project.listo ? 'ON' : 'OFF'}
-            </button>
-          </div>
+          {/* Listo toggle — solo si logueado */}
+          {user && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0 }}>
+              <span style={{ fontSize: 12, color: 'var(--text-dim)', whiteSpace: 'nowrap' }}>
+                {project.listo ? '✅ Listo para procesar' : '⏳ En espera'}
+              </span>
+              <button
+                onClick={toggleListo}
+                disabled={updating}
+                style={{
+                  background: project.listo ? '#1d2b1a' : 'var(--bg-dark)',
+                  border: `1px solid ${project.listo ? 'var(--success)' : 'var(--border)'}`,
+                  borderRadius: 7,
+                  padding: '6px 18px',
+                  fontSize: 12,
+                  fontWeight: 600,
+                  color: project.listo ? 'var(--success)' : 'var(--text-dim)',
+                  cursor: updating ? 'not-allowed' : 'pointer',
+                  opacity: updating ? 0.6 : 1,
+                  transition: 'all 0.2s',
+                  whiteSpace: 'nowrap',
+                }}
+              >
+                {updating ? '...' : project.listo ? 'ON' : 'OFF'}
+              </button>
+            </div>
+          )}
         </div>
 
         {/* GenStatus */}

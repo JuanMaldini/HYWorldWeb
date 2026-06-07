@@ -15,7 +15,6 @@ export default function App() {
       const u = getUser()
       if (u) {
         setUser(u)
-        // PocketBase SDK auto-manages token refresh, just set it
         pb.authStore.save(pb.authStore.token, u)
       }
     }
@@ -39,21 +38,25 @@ export default function App() {
   return (
     <BrowserRouter>
       <Routes>
+        {/* Home / Dashboard — público */}
         <Route
           path="/"
-          element={user ? <Navigate to="/dashboard" /> : <Login onLogin={handleLogin} />}
+          element={<Dashboard user={user} onLogout={handleLogout} onLogin={handleLogin} />}
         />
+        {/* Login */}
         <Route
           path="/login"
-          element={<Navigate to="/" />}
+          element={user ? <Navigate to="/" /> : <Login onLogin={handleLogin} />}
         />
+        {/* Legacy redirect */}
         <Route
           path="/dashboard"
-          element={user ? <Dashboard user={user} onLogout={handleLogout} /> : <Navigate to="/" />}
+          element={<Navigate to="/" />}
         />
+        {/* Project slug — público */}
         <Route
           path="/p/:slug"
-          element={user ? <Project user={user} /> : <Navigate to="/" />}
+          element={<Project user={user} />}
         />
         <Route path="*" element={<Navigate to="/" />} />
       </Routes>

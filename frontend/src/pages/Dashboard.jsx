@@ -1,17 +1,17 @@
 import { useState, useEffect } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate, Link } from 'react-router-dom'
 import { api } from '../lib/pocketbase'
 import '../App.css'
 
-export default function Dashboard({ user, onLogout }) {
+export default function Dashboard({ user, onLogout, onLogin }) {
   const [projects, setProjects] = useState([])
   const [loading, setLoading] = useState(true)
   const [showModal, setShowModal] = useState(false)
   const [deleteTarget, setDeleteTarget] = useState(null)
   const [files, setFiles] = useState([])
   const [preview, setPreview] = useState(null)
-  const [fileType, setFileType] = useState(null) // 'image' | 'ply'
-  const [projectType, setProjectType] = useState(null) // 'space' | 'asset'
+  const [fileType, setFileType] = useState(null)
+  const [projectType, setProjectType] = useState(null)
   const [creating, setCreating] = useState(false)
   const [error, setError] = useState('')
   const [dragOver, setDragOver] = useState(false)
@@ -106,18 +106,37 @@ export default function Dashboard({ user, onLogout }) {
 
   return (
     <div>
+      {/* Topbar */}
       <div className="topbar">
         <div className="topbar-logo">HY<span>World</span></div>
         <div className="topbar-user">
-          {user?.email}
-          <button onClick={onLogout} style={{ background: 'none', border: 'none', color: 'var(--accent)', cursor: 'pointer', marginLeft: 16, fontSize: 13 }}>Logout</button>
+          {user ? (
+            <>
+              <span>{user.email}</span>
+              <button
+                onClick={onLogout}
+                style={{ background: 'none', border: '1px solid var(--border)', color: 'var(--text-dim)', cursor: 'pointer', marginLeft: 16, fontSize: 12, padding: '5px 14px', borderRadius: 7 }}
+              >
+                Logout
+              </button>
+            </>
+          ) : (
+            <Link
+              to="/login"
+              style={{ background: 'var(--accent)', color: 'var(--bg-dark)', border: 'none', padding: '6px 18px', borderRadius: 7, fontSize: 13, fontWeight: 600, textDecoration: 'none' }}
+            >
+              Login
+            </Link>
+          )}
         </div>
       </div>
 
       <div className="container">
         <div className="dashboard-header">
           <h1>Projects</h1>
-          <button className="btn" onClick={() => setShowModal(true)}>+ New Project</button>
+          {user && (
+            <button className="btn" onClick={() => setShowModal(true)}>+ New Project</button>
+          )}
         </div>
 
         {loading ? (
@@ -140,11 +159,13 @@ export default function Dashboard({ user, onLogout }) {
                 <div className="project-body">
                   <div className="card-header">
                     <div className="project-name">{p.name}</div>
-                    <button
-                      className="btn-delete"
-                      onClick={(e) => { e.stopPropagation(); setDeleteTarget(p) }}
-                      title="Delete project"
-                    >🗑</button>
+                    {user && (
+                      <button
+                        className="btn-delete"
+                        onClick={(e) => { e.stopPropagation(); setDeleteTarget(p) }}
+                        title="Delete project"
+                      >🗑</button>
+                    )}
                   </div>
                   <div className="project-meta">
                     <Status s={p.status} />
@@ -216,8 +237,6 @@ export default function Dashboard({ user, onLogout }) {
               </div>
             )}
 
-
-
             {/* ── Tipo de proyecto ── */}
             <div style={{ marginBottom: 20 }}>
               <label style={{ display: 'block', fontSize: 12, color: 'var(--text-dim)', marginBottom: 8, textTransform: 'uppercase', letterSpacing: '0.5px' }}>
@@ -285,7 +304,6 @@ export default function Dashboard({ user, onLogout }) {
                   />
                 </div>
               ) : fileType === 'ply' ? (
-                /* PLY selected — show filename chip */
                 <div style={{
                   display: 'flex', alignItems: 'center', justifyContent: 'space-between',
                   background: 'var(--bg-dark)', border: '1px solid var(--accent)',
@@ -308,7 +326,6 @@ export default function Dashboard({ user, onLogout }) {
                   >Quitar</button>
                 </div>
               ) : (
-                /* Image selected — show preview */
                 <div style={{ position: 'relative' }}>
                   <img src={preview} alt="preview" style={{ width: '100%', height: 180, objectFit: 'cover', borderRadius: 8 }} />
                   <button
@@ -323,7 +340,7 @@ export default function Dashboard({ user, onLogout }) {
                 </div>
               )}
             </div>
-            )} {/* end projectType && */}
+            )}
 
             <div style={{ display: 'flex', gap: 12, justifyContent: 'flex-end' }}>
               <button
