@@ -119,6 +119,46 @@ def dump_record(rid, tag):
         dbg.warning("[%s] id=%s no se pudo leer record: %s" % (tag, rid, e))
 
 
+# ── Log cleanup: delete log files older than MAX_LOG_AGE_DAYS ─────────────
+MAX_LOG_AGE_DAYS = 2
+
+def _cleanup_old_logs():
+    """Borra archivos de log en LOGS_DIR que tengan más de MAX_LOG_AGE_DAYS días.
+    Preserva el log del día actual. Esto evita que los logs crezcan indefinidamente
+    y garantiza tener siempre al menos 2 días de historial para debugging."""
+    try:
+        if not os.path.isdir(LOGS_DIR):
+            return
+        now = time.time()
+        cutoff = now - (MAX_LOG_AGE_DAYS * 86400)
+        removed = 0
+        for fname in os.listdir(LOGS_DIR):
+            fpath = os.path.join(LOGS_DIR, fname)
+            if not os.path.isfile(fpath):
+                continue
+            # Only touch known log file patterns
+            base = os.path.splitext(fname)[0]
+            if not any(pattern in base for pattern in ("worker", "debug", "asset_server")):
+                continue
+            try:
+                mtime = os.path.getmtime(fpath)
+            except Exception:
+                continue
+            if mtime < cutoff:
+                try:
+                    os.remove(fpath)
+                    removed += 1
+                    log.debug("  Limpieza logs: borrado %s (%.1f días)" % (fname, (now - mtime) / 86400))
+                except Exception:
+                    pass
+        if removed:
+            log.info("  Limpieza logs: %d archivo(s) de más de %d días eliminado(s)" % (removed, MAX_LOG_AGE_DAYS))
+        else:
+            log.debug("  Limpieza logs: ningún archivo antiguo")
+    except Exception as e:
+        log.debug("  Limpieza logs: no se pudo ejecutar: %s" % e)
+
+
 # ── HuggingFace cache cleanup (on startup — remove *.incomplete garbage) ──
 def _cleanup_hf_cache():
     """Borra archivos *.incomplete en el cache de HuggingFace para evitar
@@ -159,6 +199,7 @@ ML_READY = False
 ML_REASON = "sin comprobar"
 
 def check_ml_env():
+    _cleanup_old_logs()  # Purge logs older than MAX_LOG_AGE_DAYS
     _cleanup_hf_cache()  # Always run cleanup on startup
     log.info("-" * 60)
     log.info("HYWorld ML Worker v3 (HY-Pano → multi-view → WorldMirror)")
