@@ -265,13 +265,15 @@ export default function Project({ user }) {
                           <a href={src} download style={{ fontSize: 12, color: 'var(--accent)', fontWeight: 600, textDecoration: 'none' }}>
                             Descargar
                           </a>
-                          <button
-                            onClick={() => setDeleteFileTarget({ url: src, filename: rawName.split('?')[0] })}
-                            style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 12, color: 'var(--danger)', fontWeight: 600, padding: 0 }}
-                            title="Eliminar modelo"
-                          >
-                            🗑
-                          </button>
+                          {user && (
+                            <button
+                              onClick={() => setDeleteFileTarget({ url: src, filename: rawName.split('?')[0] })}
+                              style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 12, color: 'var(--danger)', fontWeight: 600, padding: 0 }}
+                              title="Eliminar modelo"
+                            >
+                              🗑
+                            </button>
+                          )}
                         </span>
                       </div>
                     )
