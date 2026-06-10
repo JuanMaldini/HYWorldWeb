@@ -24,15 +24,30 @@ export default function Viewer3D({ url, onClose }) {
     const h = mount.clientHeight || 600
 
     const scene = new THREE.Scene()
-    scene.background = new THREE.Color(0x16161e)
+
+    // Gradiente profesional: oscuro en la base, claro en la cima
+    const canvas = document.createElement('canvas')
+    canvas.width = 1
+    canvas.height = 256
+    const ctx = canvas.getContext('2d')
+    const gradient = ctx.createLinearGradient(0, 0, 0, 256)
+    gradient.addColorStop(0, '#2a2d3a')    // Azul oscuro arriba
+    gradient.addColorStop(0.5, '#1a1d2e')  // Centro oscuro
+    gradient.addColorStop(1, '#0f1219')    // Base muy oscura
+    ctx.fillStyle = gradient
+    ctx.fillRect(0, 0, 1, 256)
+    const texture = new THREE.CanvasTexture(canvas)
+    scene.background = texture
 
     const camera = new THREE.PerspectiveCamera(60, w / h, 0.001, 5000)
     camera.position.set(0, 0, 3)
     cameraRef.current = camera
 
-    const renderer = new THREE.WebGLRenderer({ antialias: true })
+    const renderer = new THREE.WebGLRenderer({ antialias: true, precision: 'highp' })
     renderer.setPixelRatio(window.devicePixelRatio)
     renderer.setSize(w, h)
+    renderer.shadowMap.enabled = true
+    renderer.shadowMap.type = THREE.PCFShadowShadowMap
     mount.appendChild(renderer.domElement)
 
     const controls = new OrbitControls(camera, renderer.domElement)
@@ -40,10 +55,28 @@ export default function Viewer3D({ url, onClose }) {
     controls.dampingFactor = 0.08
     controlsRef.current = controls
 
-    scene.add(new THREE.AmbientLight(0xffffff, 0.9))
-    const dir = new THREE.DirectionalLight(0xffffff, 0.6)
-    dir.position.set(5, 10, 7)
+    // Iluminación mejorada
+    const ambient = new THREE.AmbientLight(0xffffff, 1.2)
+    scene.add(ambient)
+
+    const dir = new THREE.DirectionalLight(0xffffff, 1.0)
+    dir.position.set(8, 12, 8)
+    dir.castShadow = true
+    dir.shadow.mapSize.width = 2048
+    dir.shadow.mapSize.height = 2048
+    dir.shadow.camera.left = -50
+    dir.shadow.camera.right = 50
+    dir.shadow.camera.top = 50
+    dir.shadow.camera.bottom = -50
+    dir.shadow.camera.near = 0.5
+    dir.shadow.camera.far = 500
+    dir.shadow.bias = -0.0001
     scene.add(dir)
+
+    // Luz adicional de relleno desde atrás
+    const fill = new THREE.DirectionalLight(0x87ceeb, 0.4)
+    fill.position.set(-5, -5, -8)
+    scene.add(fill)
 
     const group = new THREE.Group()
     scene.add(group)
@@ -69,7 +102,24 @@ export default function Viewer3D({ url, onClose }) {
     if (ext === 'glb' || ext === 'gltf') {
       new GLTFLoader().load(
         url,
-        (gltf) => { fitAndAdd(gltf.scene); setStatus('malla GLB') },
+        (gltf) => {
+          // Mejorar materiales del modelo GLB
+          gltf.scene.traverse((child) => {
+            if (child.isMesh) {
+              child.castShadow = true
+              child.receiveShadow = true
+              if (child.material) {
+                // Mejorar material para mejor apariencia
+                if (child.material.isMeshStandardMaterial || child.material.isMeshPhongMaterial) {
+                  child.material.metalness = 0.3
+                  child.material.roughness = 0.6
+                }
+              }
+            }
+          })
+          fitAndAdd(gltf.scene)
+          setStatus('malla GLB')
+        },
         (e) => { if (e.total) setStatus(`Cargando 3D... ${Math.round((e.loaded / e.total) * 100)}%`) },
         (err) => { console.error('GLB load error', err); setStatus('Error al cargar el modelo') }
       )
@@ -100,11 +150,26 @@ export default function Viewer3D({ url, onClose }) {
         let object
         if (geometry.index) {
           geometry.computeVertexNormals()
-          const m = new THREE.MeshStandardMaterial({ color: hasColor ? 0xffffff : 0x7aa2f7, vertexColors: hasColor, flatShading: true })
+          const m = new THREE.MeshStandardMaterial({
+            color: hasColor ? 0xffffff : 0x7aa2f7,
+            vertexColors: hasColor,
+            flatShading: false,
+            metalness: 0.2,
+            roughness: 0.7,
+            envMapIntensity: 0.5
+          })
           matRef.current = m
           object = new THREE.Mesh(geometry, m)
+          object.castShadow = true
+          object.receiveShadow = true
         } else {
-          const m = new THREE.PointsMaterial({ size: ptSize, sizeAttenuation: true, color: hasColor ? 0xffffff : 0x7aa2f7, vertexColors: hasColor })
+          const m = new THREE.PointsMaterial({
+            size: ptSize,
+            sizeAttenuation: true,
+            color: hasColor ? 0xffffff : 0x7aa2f7,
+            vertexColors: hasColor,
+            fog: true
+          })
           matRef.current = m
           object = new THREE.Points(geometry, m)
         }
