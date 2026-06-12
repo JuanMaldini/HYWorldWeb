@@ -123,13 +123,11 @@ export default function Project({ user }) {
         <Link to="/" style={{ color: 'var(--accent)', fontSize: 20, textDecoration: 'none' }}>←</Link>
         <h1 style={{ fontSize: 16, fontWeight: 600, flex: 1 }}>{project.name}</h1>
         <span className={`status status-${project.status}`}>{project.status}</span>
-        {user && (
-          <button className="btn" onClick={handleGenerate}
-            disabled={gen || project.status === 'processing' || project.status === 'pending'}
-            style={{ marginLeft: 12 }}>
-            {gen ? 'Enviando...' : project.status === 'processing' ? 'Generando...' : project.status === 'pending' ? 'En espera...' : 'Generate'}
-          </button>
-        )}
+        <button className="btn" onClick={handleGenerate}
+          disabled={!user || gen || project.status === 'processing' || project.status === 'pending'}
+          style={{ marginLeft: 12, ...(!user && { opacity: 0.5, pointerEvents: 'none' }) }}>
+          {gen ? 'Enviando...' : project.status === 'processing' ? 'Generando...' : project.status === 'pending' ? 'En espera...' : 'Generate'}
+        </button>
       </div>
 
       <div style={{ padding: '20px 40px', maxWidth: 1100, margin: '0 auto' }}>
@@ -230,13 +228,15 @@ export default function Project({ user }) {
                   {Object.keys(PRESETS).map(name => {
                     const active = Object.entries(PRESETS[name]).every(([k, v]) => sval(k) === v)
                     return (
-                      <button key={name} onClick={() => applyPreset(name)}
+                      <button key={name} onClick={() => applyPreset(name)} disabled={!user}
                         style={{
                           flex: 1, padding: '7px 0', fontSize: 12, fontWeight: 600,
                           background: active ? 'var(--accent)' : 'var(--bg-dark)',
                           color: active ? '#fff' : 'var(--text-dim)',
                           border: `1px solid ${active ? 'var(--accent)' : 'var(--border)'}`,
-                          borderRadius: 7, cursor: 'pointer', transition: 'all 0.2s',
+                          borderRadius: 7, transition: 'all 0.2s',
+                          cursor: user ? 'pointer' : 'default',
+                          ...(!user && { opacity: 0.5, pointerEvents: 'none' }),
                         }}>
                         {name}
                       </button>
@@ -244,16 +244,18 @@ export default function Project({ user }) {
                   })}
                 </div>
                 <div
-                  onClick={async () => {
+                  onClick={user ? async () => {
                     const new360 = !sval('full_360')
                     const newSettings = { ...settings, full_360: new360 }
                     setSettings(newSettings)
                     try { await api.updateProjectSettings(project.id, newSettings) } catch (e) { console.error(e) }
-                  }}
+                  } : undefined}
                   style={{
                     display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12,
                     background: 'var(--bg-dark)', border: `1px solid ${sval('full_360') ? 'var(--accent)' : 'var(--border)'}`,
-                    borderRadius: 8, padding: '12px 14px', cursor: 'pointer', userSelect: 'none',
+                    borderRadius: 8, padding: '12px 14px', userSelect: 'none',
+                    cursor: user ? 'pointer' : 'default',
+                    ...(!user && { opacity: 0.5, pointerEvents: 'none' }),
                   }}>
                   <span>
                     <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text)' }}>Generacion 360 completa</div>
