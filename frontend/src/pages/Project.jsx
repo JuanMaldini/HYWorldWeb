@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react'
 import { useParams, Link } from 'react-router-dom'
 import { api } from '../lib/pocketbase'
 import Viewer3D from '../components/Viewer3D'
+import Pano360 from '../components/Pano360'
 
 export default function Project({ user }) {
   const { slug } = useParams()
@@ -105,7 +106,14 @@ export default function Project({ user }) {
   const files = project.files || []
   const isImg = (u) => /\.(jpg|jpeg|png|webp)$/i.test(u.split('?')[0])
   const isModel = (u) => /\.(glb|gltf)$/i.test(u.split('?')[0])
-  const imgs = files.filter(isImg)
+  // Panorama equirectangular subido por el worker: <nombre>_pano.png
+  // (PocketBase agrega sufijo aleatorio: <nombre>_pano_xxxxxxxx.png)
+  const isPano = (u) => {
+    const f = decodeURIComponent(u.split('?')[0].split('/').pop()).toLowerCase()
+    return f.includes('_pano') && f.endsWith('.png')
+  }
+  const panos = files.filter(isPano)
+  const imgs = files.filter(u => isImg(u) && !isPano(u))
   const outs = files.filter(isModel)
 
   return (
@@ -311,6 +319,16 @@ export default function Project({ user }) {
               </div>
             )}
 
+            {/* 360 panorama viewer */}
+            {panos.length > 0 && (
+              <div>
+                <div style={{ fontSize: 11, color: 'var(--text-dim)', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: 10 }}>
+                  360°
+                </div>
+                <Pano360 url={panos[0]} />
+              </div>
+            )}
+
             {/* Images */}
             {imgs.length > 0 && (
               <div>
@@ -327,7 +345,7 @@ export default function Project({ user }) {
               </div>
             )}
 
-            {imgs.length === 0 && outs.length === 0 && (
+            {imgs.length === 0 && outs.length === 0 && panos.length === 0 && (
               <div style={{ color: 'var(--text-faint)', textAlign: 'center', padding: 32 }}>
                 No files yet
               </div>

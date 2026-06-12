@@ -769,7 +769,9 @@ def delete_pb_outputs(rid):
     try:
         current = pb_get("/api/collections/%s/records/%s" % (COLLECTION, rid))
         files = current.get("files", []) or []
-        remove = [f for f in files if str(f).lower().endswith((".ply", ".obj", ".glb", ".gltf", ".splat", ".pfm"))]
+        remove = [f for f in files
+                  if str(f).lower().endswith((".ply", ".obj", ".glb", ".gltf", ".splat", ".pfm"))
+                  or ("_pano" in str(f).lower() and str(f).lower().endswith(".png"))]
         dbg.info("[delete_outputs] id=%s remove=%s" % (rid, remove))
         if remove:
             pb_patch_json(rid, {"files-": remove})
@@ -1212,6 +1214,10 @@ def _process_impl(rec):
     log.info("  [%s] %d archivo(s) de salida, subiendo..." % (slug, len(outputs)))
     for f in outputs:
         upload_output(rid, f)
+    # Subir panorama equirectangular (lo usa el visor 360 del frontend)
+    pano_file = pano_path_for_slug(slug, os.path.splitext(orig_filename)[0])
+    if os.path.exists(pano_file) and os.path.getsize(pano_file) > 0:
+        upload_output(rid, pano_file)
     dump_record(rid, "after_uploads[%s]" % slug)
 
     # ── Mark completed (fresh ID) ──────────────────────────────────────
