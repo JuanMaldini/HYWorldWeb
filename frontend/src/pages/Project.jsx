@@ -369,11 +369,12 @@ export default function Project({ user }) {
   )
 }
 
-// Presets de calidad — setean todos los campos de una vez
+// Presets de calidad — solo target_size/max_resolution/max_points.
+// full_360 es independiente: se controla con su propio toggle.
 const PRESETS = {
-  MIN: { full_360: false, target_size: 512,  max_resolution: 1024, max_points: 1000000 },
-  MED: { full_360: false, target_size: 768,  max_resolution: 1920, max_points: 2500000 },
-  MAX: { full_360: true,  target_size: 1120, max_resolution: 2560, max_points: 4000000 },
+  MIN: { target_size: 512,  max_resolution: 1024, max_points: 1000000 },
+  MED: { target_size: 768,  max_resolution: 1920, max_points: 2500000 },
+  MAX: { target_size: 1120, max_resolution: 2560, max_points: 4000000 },
 }
 
 // Defaults — siempre máxima calidad y resolución
