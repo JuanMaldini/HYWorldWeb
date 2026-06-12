@@ -57,6 +57,12 @@ export default function Project({ user }) {
     }
   }
 
+  const applyPreset = async (name) => {
+    const newSettings = { ...settings, ...PRESETS[name] }
+    setSettings(newSettings)
+    try { await api.updateProjectSettings(project.id, newSettings) } catch (e) { console.error(e) }
+  }
+
   const handleGenerate = async () => {
     setGen(true)
     try {
@@ -210,14 +216,37 @@ export default function Project({ user }) {
                 </div>
               </>
             ) : (
-              /* ── Space settings: 360 toggle (disabled) ── */
+              /* ── Space settings: presets + 360 toggle ── */
               <>
-                <div style={{
-                  display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12,
-                  background: 'var(--bg-dark)', border: `1px solid ${sval('full_360') ? 'var(--accent)' : 'var(--border)'}`,
-                  borderRadius: 8, padding: '12px 14px',
-                  pointerEvents: 'none', opacity: 0.5, cursor: 'default', userSelect: 'none',
-                }}>
+                <div style={{ display: 'flex', gap: 8, marginBottom: 14 }}>
+                  {Object.keys(PRESETS).map(name => {
+                    const active = Object.entries(PRESETS[name]).every(([k, v]) => sval(k) === v)
+                    return (
+                      <button key={name} onClick={() => applyPreset(name)}
+                        style={{
+                          flex: 1, padding: '7px 0', fontSize: 12, fontWeight: 600,
+                          background: active ? 'var(--accent)' : 'var(--bg-dark)',
+                          color: active ? '#fff' : 'var(--text-dim)',
+                          border: `1px solid ${active ? 'var(--accent)' : 'var(--border)'}`,
+                          borderRadius: 7, cursor: 'pointer', transition: 'all 0.2s',
+                        }}>
+                        {name}
+                      </button>
+                    )
+                  })}
+                </div>
+                <div
+                  onClick={async () => {
+                    const new360 = !sval('full_360')
+                    const newSettings = { ...settings, full_360: new360 }
+                    setSettings(newSettings)
+                    try { await api.updateProjectSettings(project.id, newSettings) } catch (e) { console.error(e) }
+                  }}
+                  style={{
+                    display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12,
+                    background: 'var(--bg-dark)', border: `1px solid ${sval('full_360') ? 'var(--accent)' : 'var(--border)'}`,
+                    borderRadius: 8, padding: '12px 14px', cursor: 'pointer', userSelect: 'none',
+                  }}>
                   <span>
                     <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text)' }}>Generacion 360 completa</div>
                     <div style={{ fontSize: 12, color: 'var(--text-dim)', marginTop: 2 }}>
@@ -340,11 +369,19 @@ export default function Project({ user }) {
   )
 }
 
+// Presets de calidad — setean todos los campos de una vez
+const PRESETS = {
+  MIN: { full_360: false, target_size: 512,  max_resolution: 1024, max_points: 1000000 },
+  MED: { full_360: false, target_size: 768,  max_resolution: 1920, max_points: 2500000 },
+  MAX: { full_360: true,  target_size: 1120, max_resolution: 2560, max_points: 4000000 },
+}
+
 // Defaults — siempre máxima calidad y resolución
 const DEF = {
   full_360: false,
   target_size: 1120,
   max_resolution: 2560,
+  max_points: 4000000,
   apply_sky_mask: true,
   apply_edge_mask: true,
   apply_confidence_mask: false,

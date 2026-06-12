@@ -70,6 +70,8 @@ if HYWORLD_DIR not in sys.path:
     sys.path.insert(0, HYWORLD_DIR)
 if _PANOGEN not in sys.path:
     sys.path.insert(0, _PANOGEN)
+if SCRIPT_DIR not in sys.path:
+    sys.path.insert(0, SCRIPT_DIR)  # para `import glb_export`
 
 PB_URL         = os.environ.get("PB_URL", "https://pocketbase.vmoliver.cloud").rstrip("/")
 PB_ADMIN_TOKEN = os.environ.get("PB_ADMIN_TOKEN", "")
@@ -77,9 +79,11 @@ COLLECTION     = "hyworld_data"
 POLL_INTERVAL  = int(os.environ.get("POLL_INTERVAL", "10"))
 ASSET_SERVER   = os.environ.get("ASSET_SERVER_URL", "http://host.docker.internal:8081")
 
-# Global pipeline instances (loaded once, reused)
-_PIPELINE_HYPOANO = None   # HunyuanPanoPipeline (loaded on demand)
-_PIPELINE_WORLD   = None   # WorldMirrorPipeline  (loaded once in run_ml)
+# Global pipeline instances — lazy: se cargan por job y se liberan al
+# terminar (ver _free_pipelines). Mantenerlos cargados entre jobs agota
+# la VRAM y provoca VIDEO_TDR_FAILURE (BSOD) en Windows.
+_PIPELINE_HYPOANO = None   # HunyuanPanoPipeline (load on demand)
+_PIPELINE_WORLD   = None   # WorldMirrorPipeline (load on demand)
 
 # ── Logging ──────────────────────────────────────────────────────────────
 log_file = os.path.join(LOGS_DIR, "worker_" + datetime.now().strftime("%Y%m%d") + ".log")
@@ -92,15 +96,16 @@ class _Fmt(logging.Formatter):
 log = logging.getLogger("worker")
 log.setLevel(logging.DEBUG)
 _sh = logging.StreamHandler(sys.stdout); _sh.setLevel(logging.DEBUG); _sh.setFormatter(_Fmt())
-# Solo agregar FileHandler si el entrypoint NO está redirigiendo stdout al log.
-# En Docker, entrypoint.sh ya hace `exec > >(tee -a "$LOG_FILE")`, por lo que
-# agregar otro FileHandler al mismo archivo causaría que cada línea aparezca dos veces.
+# El archivo logs/worker_YYYYMMDD.log se escribe SIEMPRE, en todos los
+# entornos. En Docker lo escribe el tee del entrypoint.sh
+# (`exec > >(tee -a "$LOG_FILE")`), así que solo agregamos FileHandler
+# fuera de Docker — si no, cada línea aparecería dos veces en el archivo.
 _IN_DOCKER = os.path.exists("/.dockerenv") or os.environ.get("HYWORLD_DIR", "").startswith("/c/")
 if not _IN_DOCKER:
     _fh = logging.FileHandler(log_file, encoding="utf-8"); _fh.setLevel(logging.DEBUG); _fh.setFormatter(_Fmt())
     log.handlers = [_fh, _sh]
 else:
-    log.handlers = [_sh]
+    log.handlers = [_sh]  # tee (Docker) ya escribe el archivo de log
 
 dbg_file = os.path.join(LOGS_DIR, "debug_" + datetime.now().strftime("%Y%m%d") + ".log")
 dbg = logging.getLogger("debug")
@@ -208,6 +213,7 @@ def check_ml_env():
     log.info("PB URL   : %s" % PB_URL)
     log.info("PB token : %s" % ("OK" if PB_ADMIN_TOKEN else "FALTA"))
     log.info("Projects : %s" % PROJECTS_DIR)
+    log.info("Log file : %s (%s)" % (log_file, "via tee/Docker" if _IN_DOCKER else "FileHandler"))
     log.info("Poll     : cada %ss" % POLL_INTERVAL)
     try:
         import psutil
@@ -580,60 +586,60 @@ def extract_multiview_from_panorama(slug, orig_filename, n_views=9):
         z = math.sin(el)
         return np.array([x, y, z])
 
-    def sample_perspective_from_pano(pano_img, azimuth_deg, elev_deg, fov_deg, out_w, out_h):
-        """Sample a perspective view from equirectangular panorama.
+    # Pano a array UNA sola vez (la version anterior llamaba np.array(pano)
+    # por cada pixel dentro de un doble for — ~9M conversiones por vista)
+    pano_arr = np.asarray(pano.convert("RGB"))
+
+    try:
+        import cv2
+    except Exception:
+        cv2 = None
+
+    def sample_perspective_from_pano(azimuth_deg, elev_deg, fov_deg, out_w, out_h):
+        """Sample a perspective view from equirectangular panorama (vectorizado).
 
         Returns PIL Image of the perspective projection."""
-        # Camera looking direction
+        # Camera basis: dir + right + up
         cam_dir = equirectangular_to_cartesian(azimuth_deg, elev_deg)
-
-        # Camera "right" vector (perpendicular to cam_dir, in horizontal plane)
-        # For a standard perspective camera: right = cross(cam_dir, world_up)
         world_up = np.array([0, 0, 1])
         cam_right = np.cross(world_up, cam_dir)
         cam_right = cam_right / (np.linalg.norm(cam_right) + 1e-8)
-
-        # Camera "up" vector
         cam_up = np.cross(cam_dir, cam_right)
 
         # Field of view → focal length
         fov_rad = math.radians(fov_deg)
         focal_px = (out_w / 2) / math.tan(fov_rad / 2)
-
-        # Build output image
-        out = np.zeros((out_h, out_w, 3), dtype=np.uint8)
         cx, cy = out_w // 2, out_h // 2
 
-        # Ray direction for each pixel
-        for py in range(out_h):
-            for px in range(out_w):
-                # NDC offsets from center
-                dx = (px - cx) / focal_px
-                dy = (py - cy) / focal_px
+        # Ray direction por pixel (vectorizado)
+        xs, ys = np.meshgrid(np.arange(out_w, dtype=np.float64),
+                             np.arange(out_h, dtype=np.float64))
+        dx = (xs - cx) / focal_px
+        dy = (ys - cy) / focal_px
+        ray_cam = np.stack([dx, -dy, np.ones_like(dx)], axis=-1)
+        ray_cam /= np.linalg.norm(ray_cam, axis=-1, keepdims=True) + 1e-8
 
-                # Ray direction in camera space
-                ray_cam = np.array([dx, -dy, 1.0])
-                ray_cam = ray_cam / (np.linalg.norm(ray_cam) + 1e-8)
+        # Camera → world: ray_world[...,j] = sum_k ray_cam[...,k] * basis[k,j]
+        basis = np.stack([cam_right, cam_up, cam_dir])
+        ray_world = ray_cam @ basis
+        ray_world /= np.linalg.norm(ray_world, axis=-1, keepdims=True) + 1e-8
 
-                # Transform to world space
-                ray_world = (ray_cam[0] * cam_right +
-                             ray_cam[1] * cam_up +
-                             ray_cam[2] * cam_dir)
-                ray_world = ray_world / (np.linalg.norm(ray_world) + 1e-8)
+        # Direccion → UV equirectangular
+        az = np.arctan2(ray_world[..., 0], ray_world[..., 1])   # [-π, π]
+        el = np.arcsin(np.clip(ray_world[..., 2], -1, 1))
+        u = (az / (2 * math.pi) + 0.5) % 1.0
+        v = el / math.pi + 0.5
 
-                # Convert to equirectangular UV
-                # x = sin(az), y = cos(az) for longitude; z for latitude
-                az = math.atan2(ray_world[0], ray_world[1])   # [-π, π]
-                el = math.asin(np.clip(ray_world[2], -1, 1))
-
-                # Map to pixel coordinates in panorama
-                u = (az / (2 * math.pi) + 0.5) % 1.0
-                v = (el / math.pi + 0.5)
-                px_pano = int(u * pano_w) % pano_w
-                py_pano = int(v * pano_h)
-                py_pano = max(0, min(pano_h - 1, py_pano))
-
-                out[py, px] = np.array(pano_img)[py_pano, px_pano]
+        if cv2 is not None:
+            map_x = ((u * pano_w) % pano_w).astype(np.float32)
+            map_y = np.clip(v * pano_h, 0, pano_h - 1).astype(np.float32)
+            out = cv2.remap(pano_arr, map_x, map_y,
+                            interpolation=cv2.INTER_LINEAR,
+                            borderMode=cv2.BORDER_WRAP)
+        else:
+            px_pano = (u * pano_w).astype(np.int64) % pano_w
+            py_pano = np.clip((v * pano_h).astype(np.int64), 0, pano_h - 1)
+            out = pano_arr[py_pano, px_pano]
 
         return Image.fromarray(out)
 
@@ -653,7 +659,7 @@ def extract_multiview_from_panorama(slug, orig_filename, n_views=9):
     for i, (az, el) in enumerate(view_angles):
         view_path = view_path_for_slug(slug, base_name, i)
         try:
-            view_img = sample_perspective_from_pano(pano, az, el, VIEW_FOV, VIEW_W, VIEW_H)
+            view_img = sample_perspective_from_pano(az, el, VIEW_FOV, VIEW_W, VIEW_H)
             view_img.save(view_path, "PNG")
             log.debug("  [%s] multiview: view %d (az=%d°, el=%d°) -> %s" % (
                 slug, i, az, el, view_path))
@@ -706,7 +712,9 @@ def run_ml(slug, settings=None, want_mesh=True):
     kwargs.setdefault("apply_edge_mask", True)
     kwargs.setdefault("max_resolution", 2560)
     kwargs.setdefault("target_size", 1120)
-    kwargs.setdefault("compress_pts_max_points", 4_000_000)
+    # max_points viene de los presets del frontend (MIN/MED/MAX)
+    kwargs.setdefault("compress_pts_max_points",
+                      int((settings or {}).get("max_points", 4_000_000)))
 
     log.info("  [%s] run_ml: %d views. Ajustes=%s" % (
         slug, len(views), {k: v for k, v in kwargs.items()
@@ -732,179 +740,10 @@ def run_ml(slug, settings=None, want_mesh=True):
 
 
 def export_glb_from_ply(slug):
-    """Genera mesh.glb desde depth map + imagen de vista (malla 3D real con colores).
-    Proyecta cada pixel del depth map al espacio 3D usando los intrinsecos de camara,
-    conecta pixeles adyacentes con triangulos filtrando discontinuidades de profundidad.
-    Sin CUDA, sin re-inferencia. Fallback: nube de puntos si faltan depth maps.
-    """
-    import numpy as np
-    import trimesh
-    import json
-
-    output_dir = os.path.join(PROJECTS_DIR, slug, "output")
-    views_dir  = os.path.join(PROJECTS_DIR, slug, "views")
-    glb_path   = os.path.join(output_dir, "mesh.glb")
-
-    # --- Buscar depth maps y vistas ---
-    depth_files = sorted(glob.glob(os.path.join(output_dir, "depth", "depth_*.npy")))
-    view_files  = sorted(glob.glob(os.path.join(views_dir, "*.png")) +
-                         glob.glob(os.path.join(views_dir, "*.jpg")))
-    cam_path    = os.path.join(output_dir, "camera_params.json")
-
-    if not depth_files or not view_files or not os.path.exists(cam_path):
-        log.warning("  [%s] glb: sin depth maps — fallback a nube de puntos" % slug)
-        return _export_glb_pointcloud(slug, glb_path)
-
-    try:
-        with open(cam_path) as f:
-            cam_data = json.load(f)
-    except Exception as e:
-        log.warning("  [%s] glb: camera_params.json no leible (%s) — fallback" % (slug, e))
-        return _export_glb_pointcloud(slug, glb_path)
-
-    log.info("  [%s] glb: reconstruyendo malla desde %d depth map(s)..." % (
-        slug, len(depth_files)))
-
-    try:
-        from PIL import Image
-    except ImportError:
-        return _export_glb_pointcloud(slug, glb_path)
-
-    all_verts  = []
-    all_colors = []
-    all_faces  = []
-    total_verts = 0
-
-    for i, (depth_path, view_path) in enumerate(zip(depth_files, view_files)):
-        # Cargar depth (float32, en metros)
-        depth = np.load(depth_path)
-        if depth.ndim == 3:
-            depth = depth[..., 0]
-        depth = depth.astype(np.float32)
-
-        # Submuestreo: step=2 → 4x menos vertices/triangulos, GLB ~7 MB vs 28 MB
-        STEP = 2
-        depth = depth[::STEP, ::STEP]
-
-        img = np.array(Image.open(view_path).convert("RGB"))
-        if img.shape[:2] != depth.shape:
-            img = np.array(Image.fromarray(img).resize(
-                (depth.shape[1], depth.shape[0]), Image.BILINEAR))
-
-        H, W = depth.shape
-
-        # Intrínsecos de cámara (ajustados al submuestreo)
-        ci   = min(i, len(cam_data["intrinsics"]) - 1)
-        intr = cam_data["intrinsics"][ci]["matrix"]
-        fx, fy = float(intr[0][0]) / STEP, float(intr[1][1]) / STEP
-        cx, cy = float(intr[0][2]) / STEP, float(intr[1][2]) / STEP
-
-        # Extrinsecos (world-to-camera 4x4)
-        ei   = min(i, len(cam_data["extrinsics"]) - 1)
-        E    = np.array(cam_data["extrinsics"][ei]["matrix"], dtype=np.float64)
-        R, t = E[:3, :3], E[:3, 3]
-        # camera-to-world: p_world = R^T*(p_cam - t)
-        Rt   = R.T
-
-        # Desproyectar pixeles a espacio de camara
-        ys, xs = np.mgrid[0:H, 0:W]
-        Z = depth
-        X = (xs - cx) * Z / fx
-        Y = (ys - cy) * Z / fy
-
-        # Transformar a espacio mundo (vectorizado)
-        pts_cam = np.stack([X, Y, Z], axis=-1).reshape(-1, 3)
-        pts_world = (pts_cam - t) @ Rt  # (N, 3)
-
-        # Mascara de pixeles validos (profundidad en rango razonable)
-        valid_2d = (Z > 0.05) & (Z < 100.0)
-        valid_flat = valid_2d.ravel()
-
-        # Mapa de indice de vertice por pixel
-        idx_grid = np.full(H * W, -1, dtype=np.int32)
-        idx_grid[valid_flat] = np.arange(int(valid_flat.sum()), dtype=np.int32) + total_verts
-        idx_grid = idx_grid.reshape(H, W)
-
-        # Crear triangulos vectorizado (quad → 2 triangulos por pixel)
-        yy, xx = np.mgrid[0:H-1, 0:W-1]
-        v00 = idx_grid[yy,   xx  ]
-        v10 = idx_grid[yy+1, xx  ]
-        v01 = idx_grid[yy,   xx+1]
-        v11 = idx_grid[yy+1, xx+1]
-
-        # Filtrar "flying triangles": descartar quads con salto de profundidad grande
-        Z00 = Z[yy,   xx  ]
-        Z10 = Z[yy+1, xx  ]
-        Z01 = Z[yy,   xx+1]
-        Z11 = Z[yy+1, xx+1]
-        # Umbral: max 15% del valor de profundidad o 0.1m (el mayor)
-        ref1  = np.maximum(np.maximum(Z00, Z10), Z01)
-        thr1  = np.maximum(ref1 * 0.15, 0.1)
-        ok1   = ((v00 >= 0) & (v10 >= 0) & (v01 >= 0) &
-                 (np.abs(Z00-Z10) < thr1) & (np.abs(Z00-Z01) < thr1) & (np.abs(Z10-Z01) < thr1))
-        ref2  = np.maximum(np.maximum(Z10, Z11), Z01)
-        thr2  = np.maximum(ref2 * 0.15, 0.1)
-        ok2   = ((v10 >= 0) & (v11 >= 0) & (v01 >= 0) &
-                 (np.abs(Z10-Z11) < thr2) & (np.abs(Z10-Z01) < thr2) & (np.abs(Z11-Z01) < thr2))
-
-        tri1 = np.stack([v00[ok1], v10[ok1], v01[ok1]], axis=1)
-        tri2 = np.stack([v10[ok2], v11[ok2], v01[ok2]], axis=1)
-
-        verts  = pts_world[valid_flat].astype(np.float32)
-        colors = img.reshape(-1, 3)[valid_flat]
-
-        all_verts.append(verts)
-        all_colors.append(colors)
-        if tri1.shape[0]: all_faces.append(tri1)
-        if tri2.shape[0]: all_faces.append(tri2)
-        total_verts += len(verts)
-
-        log.info("  [%s] glb: vista %d → %d verts | %d tris" % (
-            slug, i, len(verts), tri1.shape[0] + tri2.shape[0]))
-
-    if not all_verts:
-        log.error("  [%s] glb: sin vertices" % slug)
-        return _export_glb_pointcloud(slug, glb_path)
-
-    vertices = np.concatenate(all_verts)
-    colors   = np.concatenate(all_colors)
-    faces    = np.concatenate(all_faces) if all_faces else np.zeros((0, 3), dtype=np.int32)
-
-    colors_rgba = np.concatenate(
-        [colors, np.full((len(colors), 1), 255, dtype=np.uint8)], axis=1)
-
-    try:
-        mesh = trimesh.Trimesh(vertices=vertices, faces=faces,
-                               vertex_colors=colors_rgba, process=False)
-        mesh.export(glb_path)
-    except Exception as e:
-        log.error("  [%s] glb: export trimesh fallo: %s — fallback" % (slug, e))
-        return _export_glb_pointcloud(slug, glb_path)
-
-    if not os.path.exists(glb_path) or os.path.getsize(glb_path) == 0:
-        return _export_glb_pointcloud(slug, glb_path)
-
-    log.info("  [%s] glb: mesh.glb generado — %d verts | %d tris | %.2f MB" % (
-        slug, len(vertices), len(faces), os.path.getsize(glb_path) / 1e6))
-    return glb_path
-
-
-def _export_glb_pointcloud(slug, glb_path):
-    """Fallback: exporta points.ply como nube de puntos GLB."""
-    import trimesh
-    ply_path = os.path.join(PROJECTS_DIR, slug, "output", "points.ply")
-    if not os.path.exists(ply_path):
-        log.error("  [%s] glb: points.ply no existe" % slug)
-        return None
-    try:
-        cloud = trimesh.load(ply_path, process=False)
-        cloud.export(glb_path)
-        log.info("  [%s] glb: fallback nube de puntos (%.2f MB)" % (
-            slug, os.path.getsize(glb_path) / 1e6))
-        return glb_path
-    except Exception as e:
-        log.error("  [%s] glb: fallback fallo: %s" % (slug, e))
-        return None
+    """Genera mesh.glb desde depth maps + camera params.
+    Implementacion unica en glb_export.py (sin CUDA, sin re-inferencia)."""
+    from glb_export import export_glb
+    return export_glb(slug, PROJECTS_DIR)
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -1071,6 +910,7 @@ def process_asset(rec):
     }
 
     # ── Enviar al asset server (async) ───────────────────────────────
+    log.info("[JOB START] slug=%s settings=%s" % (slug, settings))
     set_status(rid, "processing")
     log.info("  [%s] asset: enviando a %s (texture=%s)..." % (slug, ASSET_SERVER, enable_tex))
     try:
@@ -1163,7 +1003,39 @@ def process_asset(rec):
 # ─────────────────────────────────────────────────────────────────────
 # Process one project
 # ─────────────────────────────────────────────────────────────────────
+def _free_pipelines():
+    """Libera pipelines y VRAM. Sin esto, los modelos quedan residentes
+    entre jobs y agotan la VRAM → VIDEO_TDR_FAILURE (BSOD) en Windows."""
+    global _PIPELINE_HYPOANO, _PIPELINE_WORLD
+    _PIPELINE_HYPOANO = None
+    _PIPELINE_WORLD = None
+    import gc
+    gc.collect()
+    try:
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.ipc_collect()
+            log.info("[VRAM FREED] cuda_memory_allocated=%.2fGB" % (
+                torch.cuda.memory_allocated() / 1e9))
+    except Exception as e:
+        log.warning("[VRAM FREED] no se pudo liberar CUDA: %s" % e)
+    gc.collect()
+
+
 def process(rec):
+    """Wrapper: ejecuta el job y SIEMPRE libera pipelines/VRAM al terminar,
+    incluso si el job lanzo una excepcion."""
+    try:
+        _process_impl(rec)
+    finally:
+        # Solo limpiar si algun pipeline llego a cargarse (evita spamear
+        # el log en los ciclos de poll donde todos los proyectos se saltan)
+        if _PIPELINE_HYPOANO is not None or _PIPELINE_WORLD is not None:
+            _free_pipelines()
+
+
+def _process_impl(rec):
     """Procesa un proyecto completo.
     - Si project_type='asset': imagen → Hunyuan3D-2 → GLB (asset 3D de objeto)
     - Si input_type='ply':     PLY → GLB directo (sin ML)
@@ -1212,6 +1084,7 @@ def process(rec):
             log.info("  [%s] listo=OFF — esperando" % slug)
             return
 
+        log.info("[JOB START] slug=%s settings=%s" % (slug, rec.get("settings") or {}))
         set_status(rid, "processing")
         ok = process_ply_input(slug, rid, ply_filename)
         if not ok:
@@ -1282,6 +1155,7 @@ def process(rec):
     # full_360 = True  -> HY-Pano 360 + multiview (9 vistas) + GLB completo
     # full_360 = False -> solo imagen de frente (GLB rapido del frente)
     settings = rec.get("settings") or {}
+    log.info("[JOB START] slug=%s settings=%s" % (slug, settings))
     full_360 = bool(settings.get("full_360", False))
     log.info("  [%s] modo generacion: %s" % (slug, "360 COMPLETO" if full_360 else "SOLO FRENTE"))
 
@@ -1453,11 +1327,41 @@ def reconcile(recs):
 
 
 # ─────────────────────────────────────────────────────────────────────
+# worker_config.json — referencia per-machine (el worker no lo consume:
+# el frontend manda los settings resueltos via PocketBase)
+# ─────────────────────────────────────────────────────────────────────
+WORKER_CONFIG_DEFAULT = {
+    "note": "Per-machine config. Edit preset values here for this workstation.",
+    "presets": {
+        "MIN": {"full_360": False, "target_size": 512,  "max_resolution": 1024, "max_points": 1000000},
+        "MED": {"full_360": False, "target_size": 768,  "max_resolution": 1920, "max_points": 2500000},
+        "MAX": {"full_360": True,  "target_size": 1120, "max_resolution": 2560, "max_points": 4000000},
+    },
+}
+
+def ensure_worker_config():
+    """Crea HyWorldWebData/worker_config.json con defaults si no existe."""
+    base = "/c/HyWorldWebData" if _IN_DOCKER else r"C:\HyWorldWebData"
+    cfg_path = os.path.join(base, "worker_config.json")
+    try:
+        if os.path.exists(cfg_path):
+            log.info("worker_config.json encontrado: %s" % cfg_path)
+        else:
+            os.makedirs(base, exist_ok=True)
+            with open(cfg_path, "w", encoding="utf-8") as f:
+                json.dump(WORKER_CONFIG_DEFAULT, f, indent=2)
+            log.info("worker_config.json creado con defaults: %s" % cfg_path)
+    except Exception as e:
+        log.warning("worker_config.json no disponible (%s): %s" % (cfg_path, e))
+
+
+# ─────────────────────────────────────────────────────────────────────
 # Main loop
 # ─────────────────────────────────────────────────────────────────────
 def main():
     global ML_READY, ML_REASON
     ML_READY, ML_REASON = check_ml_env()
+    ensure_worker_config()
 
     cycle = 0
     while True:
