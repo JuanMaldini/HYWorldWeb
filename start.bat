@@ -47,6 +47,21 @@ if not exist "%DATA%\repo"      mkdir "%DATA%\repo"
 if not exist "%DATA%\projects"  mkdir "%DATA%\projects"
 if not exist "%DATA%\logs"      mkdir "%DATA%\logs"
 
+:: ── 3b. Limpiar cache HuggingFace corrupta ────────────────
+:: Borra descargas interrumpidas (*.incomplete, *.part) y locks stale
+:: (*.lock) que bloquean re-descargas de hf_hub.
+%LOG% "Limpiando cache HuggingFace incompleta..."
+set "HF_HUB=%DATA%\models\hub"
+set "HF_CLEANED=0"
+if exist "%HF_HUB%" (
+    for /f %%C in ('powershell -NoProfile -Command "$f = @(Get-ChildItem -Path '%HF_HUB%' -Recurse -File -Include *.incomplete,*.lock,*.part -ErrorAction SilentlyContinue); $f | Remove-Item -Force -ErrorAction SilentlyContinue; $f.Count"') do set "HF_CLEANED=%%C"
+)
+if "!HF_CLEANED!"=="0" (
+    %LOG% "  Cache OK"
+) else (
+    %LOG% "  !HF_CLEANED! archivo(s) corrupto(s) eliminado(s)"
+)
+
 :: ── 4. Verificar .env ───────────────────────────────────
 %LOG% "Verificando configuracion (.env)..."
 if not exist "%DATA%\.env" (
