@@ -37,6 +37,7 @@ services:
       - HF_HOME=/c/HyWorldWebData/models
       - HUGGINGFACE_HUB_CACHE=/c/HyWorldWebData/models/hub
       - TRANSFORMERS_CACHE=/c/HyWorldWebData/models/hub
+      - HF_TOKEN=${HF_TOKEN}
       # Asset server (Hunyuan3D-2 corriendo en Windows host)
       - ASSET_SERVER_URL=http://host.docker.internal:8081
     healthcheck:
