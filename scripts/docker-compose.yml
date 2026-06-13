@@ -17,13 +17,13 @@ services:
             - driver: nvidia
               count: 1
               capabilities: [gpu]
-    ports:
-      - "5173:5173"
     volumes:
       - C:/HyWorldWebData:/c/HyWorldWebData
-      - ./scripts:/workspace/scripts
+      # MODELS_DIR viene de C:/HyWorldWebData/.env (start.bat lo exporta)
+      - ${MODELS_DIR:-C:/HyWorldWebData/models}:/c/HyWorldWebData/models
+      - .:/workspace/scripts
     env_file:
-      - C:/HyWorldWebData/.env
+      - ../.env
     extra_hosts:
       - "host.docker.internal:host-gateway"
     environment:
@@ -39,6 +39,9 @@ services:
       - TRANSFORMERS_CACHE=/c/HyWorldWebData/models/hub
       # Asset server (Hunyuan3D-2 corriendo en Windows host)
       - ASSET_SERVER_URL=http://host.docker.internal:8081
+      # Token HuggingFace — viene de C:/HyWorldWebData/.env (start.bat lo exporta)
+      - HF_TOKEN=${HF_TOKEN:-}
+      - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN:-}
     healthcheck:
       test: ["CMD", "python3.11", "-c", "import torch; assert torch.cuda.is_available()"]
       interval: 30s

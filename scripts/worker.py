@@ -71,10 +71,10 @@ if HYWORLD_DIR not in sys.path:
 if _PANOGEN not in sys.path:
     sys.path.insert(0, _PANOGEN)
 
-PB_URL         = os.environ.get("PB_URL", "https://pocketbase.vmoliver.cloud").rstrip("/")
-PB_ADMIN_TOKEN = os.environ.get("PB_ADMIN_TOKEN", "")
+PB_URL         = os.environ.get("PB_URL", "https://pocketbase.vmoliver.cloud").strip().rstrip("/")
+PB_ADMIN_TOKEN = os.environ.get("PB_ADMIN_TOKEN", "").strip()
 COLLECTION     = "hyworld_data"
-POLL_INTERVAL  = int(os.environ.get("POLL_INTERVAL", "10"))
+POLL_INTERVAL  = 10  # segundos (hardcodeado)
 ASSET_SERVER   = os.environ.get("ASSET_SERVER_URL", "http://host.docker.internal:8081")
 
 # Global pipeline instances (loaded once, reused)
@@ -353,11 +353,17 @@ IMG_EXT = (".jpg", ".jpeg", ".png", ".webp")
 PLY_EXT = (".ply",)
 
 def get_original_image_name(files):
-    """Return the original image filename from PocketBase files list."""
+    """Return the original image filename from PocketBase files list.
+    Excluye los panoramas generados (contienen "_pano" en el nombre)."""
     for f in files:
-        if isinstance(f, str) and f.lower().endswith(IMG_EXT):
+        if isinstance(f, str) and f.lower().endswith(IMG_EXT) and "_pano" not in f.lower():
             return f
     return None
+
+def get_pano_filenames(files):
+    """Filenames de panoramas ya subidos a PocketBase."""
+    return [f for f in files
+            if isinstance(f, str) and "_pano" in f.lower() and f.lower().endswith(IMG_EXT)]
 
 def get_ply_filename(files):
     """Return the .ply filename from PocketBase files list, if any."""
@@ -412,6 +418,22 @@ def prepare_front_view(slug, orig_filename):
         return None
 
 
+def pano_is_valid(path):
+    """True si el panorama existe, abre como imagen y es equirectangular (2:1).
+    Detecta archivos corruptos o escrituras incompletas de corridas fallidas."""
+    try:
+        if not os.path.isfile(path) or os.path.getsize(path) == 0:
+            return False
+        from PIL import Image
+        with Image.open(path) as im:
+            im.verify()
+        with Image.open(path) as im:
+            w_, h_ = im.size
+        return w_ >= 512 and abs(w_ - 2 * h_) <= 2
+    except Exception:
+        return False
+
+
 # ─────────────────────────────────────────────────────────────────────
 # HY-Pano 2.0 — single image → 360° panorama
 # ─────────────────────────────────────────────────────────────────────
@@ -431,17 +453,23 @@ def generate_panorama(slug, orig_filename):
 
     input_file = input_path_for_slug(slug, orig_filename)
     if not os.path.exists(input_file):
-        log.error("  [%s] pano: input不存在 %s" % (slug, input_file))
+        log.error("  [%s] pano: input no existe %s" % (slug, input_file))
         return None
 
     base_name = os.path.splitext(orig_filename)[0]
     pano_path = pano_path_for_slug(slug, base_name)
     ensure_dir(pano_path)
 
-    # Skip if already generated
-    if os.path.exists(pano_path) and os.path.getsize(pano_path) > 0:
-        log.info("  [%s] pano: ya existe (cache) -> %s" % (slug, pano_path))
-        return pano_path
+    # Skip if already generated (solo si es valido; corrupto/incompleto se rehace)
+    if os.path.exists(pano_path):
+        if pano_is_valid(pano_path):
+            log.info("  [%s] pano: ya existe (cache valido) -> %s" % (slug, pano_path))
+            return pano_path
+        log.warning("  [%s] pano: cache corrupto/incompleto — regenerando" % slug)
+        try:
+            os.remove(pano_path)
+        except Exception:
+            pass
 
     log.info("  [%s] pano: generando panorama..." % slug)
     log.info("  [%s] pano: input=%s" % (slug, input_file))
@@ -506,12 +534,16 @@ def generate_panorama(slug, orig_filename):
                 log.error("  [%s] pano: no se pudo guardar panorama: %s" % (slug, img_err))
                 return None
 
-        if os.path.exists(pano_path) and os.path.getsize(pano_path) > 0:
+        if pano_is_valid(pano_path):
             log.info("  [%s] pano: generado -> %s (%.2f MB)" % (
                 slug, pano_path, os.path.getsize(pano_path)/1e6))
             return pano_path
         else:
-            log.error("  [%s] pano: archivo no fue creado" % slug)
+            log.error("  [%s] pano: archivo no creado o invalido — descartado" % slug)
+            try:
+                os.remove(pano_path)
+            except Exception:
+                pass
             return None
     except Exception as e:
         log.error("  [%s] pano: error al guardar resultado: %s" % (slug, e))
@@ -580,75 +612,51 @@ def extract_multiview_from_panorama(slug, orig_filename, n_views=9):
         z = math.sin(el)
         return np.array([x, y, z])
 
+    pano_arr = np.array(pano.convert("RGB"))  # una sola conversion (no por pixel)
+
     def sample_perspective_from_pano(pano_img, azimuth_deg, elev_deg, fov_deg, out_w, out_h):
-        """Sample a perspective view from equirectangular panorama.
+        """Sample a perspective view from equirectangular panorama (vectorizado).
 
         Returns PIL Image of the perspective projection."""
-        # Camera looking direction
+        # Camera basis
         cam_dir = equirectangular_to_cartesian(azimuth_deg, elev_deg)
-
-        # Camera "right" vector (perpendicular to cam_dir, in horizontal plane)
-        # For a standard perspective camera: right = cross(cam_dir, world_up)
         world_up = np.array([0, 0, 1])
         cam_right = np.cross(world_up, cam_dir)
         cam_right = cam_right / (np.linalg.norm(cam_right) + 1e-8)
-
-        # Camera "up" vector
         cam_up = np.cross(cam_dir, cam_right)
 
-        # Field of view → focal length
+        # FOV -> focal
         fov_rad = math.radians(fov_deg)
         focal_px = (out_w / 2) / math.tan(fov_rad / 2)
-
-        # Build output image
-        out = np.zeros((out_h, out_w, 3), dtype=np.uint8)
         cx, cy = out_w // 2, out_h // 2
 
-        # Ray direction for each pixel
-        for py in range(out_h):
-            for px in range(out_w):
-                # NDC offsets from center
-                dx = (px - cx) / focal_px
-                dy = (py - cy) / focal_px
+        # Rays para todos los pixeles a la vez
+        xs, ys = np.meshgrid(np.arange(out_w), np.arange(out_h))
+        dx = (xs - cx) / focal_px
+        dy = (ys - cy) / focal_px
+        ray = np.stack([dx, -dy, np.ones_like(dx, dtype=np.float64)], axis=-1)
+        ray /= (np.linalg.norm(ray, axis=-1, keepdims=True) + 1e-8)
 
-                # Ray direction in camera space
-                ray_cam = np.array([dx, -dy, 1.0])
-                ray_cam = ray_cam / (np.linalg.norm(ray_cam) + 1e-8)
+        ray_world = (ray[..., 0:1] * cam_right +
+                     ray[..., 1:2] * cam_up +
+                     ray[..., 2:3] * cam_dir)
+        ray_world /= (np.linalg.norm(ray_world, axis=-1, keepdims=True) + 1e-8)
 
-                # Transform to world space
-                ray_world = (ray_cam[0] * cam_right +
-                             ray_cam[1] * cam_up +
-                             ray_cam[2] * cam_dir)
-                ray_world = ray_world / (np.linalg.norm(ray_world) + 1e-8)
+        # Direccion -> UV equirectangular
+        az = np.arctan2(ray_world[..., 0], ray_world[..., 1])   # [-pi, pi]
+        el = np.arcsin(np.clip(ray_world[..., 2], -1, 1))
+        u = (az / (2 * math.pi) + 0.5) % 1.0
+        v = (el / math.pi + 0.5)
+        px_pano = (u * pano_w).astype(np.int64) % pano_w
+        py_pano = np.clip((v * pano_h).astype(np.int64), 0, pano_h - 1)
 
-                # Convert to equirectangular UV
-                # x = sin(az), y = cos(az) for longitude; z for latitude
-                az = math.atan2(ray_world[0], ray_world[1])   # [-π, π]
-                el = math.asin(np.clip(ray_world[2], -1, 1))
+        out = pano_arr[py_pano, px_pano]
+        return Image.fromarray(out.astype(np.uint8))
 
-                # Map to pixel coordinates in panorama
-                u = (az / (2 * math.pi) + 0.5) % 1.0
-                v = (el / math.pi + 0.5)
-                px_pano = int(u * pano_w) % pano_w
-                py_pano = int(v * pano_h)
-                py_pano = max(0, min(pano_h - 1, py_pano))
-
-                out[py, px] = np.array(pano_img)[py_pano, px_pano]
-
-        return Image.fromarray(out)
-
-    # View angles: center + ring at 45° intervals + ring at 45° with ±elev
-    azimuths = [0, 45, 90, 135, 180, 225, 270, 315]
-    elevations = [0, 15, -15]
-    view_angles = []
-    view_angles.append((0, 0))       # center
-    for az in azimuths:
-        view_angles.append((az, 0))  # ring 1 — horizontal
-    for az in azimuths:
-        view_angles.append((az % 360, 30 if az % 90 == 0 else -30))  # ring 2 — elevated
-
-    # Trim to n_views
-    view_angles = view_angles[:n_views]
+    # View angles: cobertura horizontal uniforme, sin duplicados.
+    # n_views=9 -> azimuts cada 40 grados (0, 40, ..., 320), elev 0.
+    step = 360.0 / n_views
+    view_angles = [(round(i * step), 0) for i in range(n_views)]
 
     for i, (az, el) in enumerate(view_angles):
         view_path = view_path_for_slug(slug, base_name, i)
@@ -926,6 +934,50 @@ def set_status(rid, status):
     except Exception as e:
         log.warning("  [%s] no se pudo fijar status=%s: %s" % (rid, status, e))
 
+def set_json_fields(rid, **fields):
+    """Mergea campos al json del record (lee fresco, escribe atomico)."""
+    try:
+        current = pb_get("/api/collections/%s/records/%s" % (COLLECTION, rid))
+        parsed = current.get("json") or {}
+        if isinstance(parsed, str):
+            try:
+                parsed = json.loads(parsed or "{}")
+            except Exception:
+                parsed = {}
+        parsed.update(fields)
+        pb_patch_json(rid, {"json": parsed})
+        return True
+    except Exception as e:
+        log.warning("  [%s] set_json_fields%s: %s" % (rid, tuple(fields), e))
+        return False
+
+
+def sync_pano_to_pb(slug, rid, pano_path, force=False):
+    """Sube el panorama a PocketBase apenas existe, para habilitar el visor 360
+    en el frontend mientras el modelo 3D sigue generandose.
+    - force=True (regenerate): reemplaza el pano anterior en PB.
+    - marca json.pano_status='ready' + pano_at (el front lo detecta por nombre *_pano)."""
+    try:
+        current = pb_get("/api/collections/%s/records/%s" % (COLLECTION, rid))
+        existing = get_pano_filenames(current.get("files", []) or [])
+        if existing and not force:
+            log.info("  [%s] pano: ya sincronizado en PB (%s)" % (slug, existing[0]))
+            set_json_fields(rid, pano_status="ready")
+            return True
+        if existing:
+            pb_patch_json(rid, {"files-": existing})
+            log.info("  [%s] pano: %d pano(s) anterior(es) eliminado(s) de PB" % (slug, len(existing)))
+        if not upload_output(rid, pano_path):
+            set_json_fields(rid, pano_status="error")
+            return False
+        set_json_fields(rid, pano_status="ready", pano_at=datetime.now().isoformat())
+        log.info("  [%s] pano: SINCRONIZADO -> visor 360 habilitado en frontend" % slug)
+        return True
+    except Exception as e:
+        log.error("  [%s] pano: sync a PB fallo: %s" % (slug, e))
+        return False
+
+
 def delete_pb_outputs(rid):
     try:
         current = pb_get("/api/collections/%s/records/%s" % (COLLECTION, rid))
@@ -954,8 +1006,11 @@ def list_outputs(out_dir):
     return sorted(found)
 
 def mesh_glb_exists(slug):
-    glb = os.path.join(PROJECTS_DIR, slug, "output", "mesh.glb")
-    return os.path.isfile(glb) and os.path.getsize(glb) > 0
+    for name in ("mesh.glb", "asset.glb"):
+        glb = os.path.join(PROJECTS_DIR, slug, "output", name)
+        if os.path.isfile(glb) and os.path.getsize(glb) > 0:
+            return True
+    return False
 
 def is_built(rec):
     if rec["status"] == "completed" and mesh_glb_exists(rec["slug"]):
@@ -1187,8 +1242,8 @@ def process(rec):
     ply_filename = get_ply_filename(rec["files"])
     orig_filename = get_original_image_name(rec["files"])
 
-    # Detectar automáticamente por extensión si input_type no está seteado
-    if ply_filename and input_type != "image":
+    # Detectar automaticamente por extension si input_type no esta seteado
+    if not rec.get("input_type_explicit") and ply_filename and not orig_filename:
         input_type = "ply"
 
     log.info("[%s] process: listo=%s status=%s files=%d input_type=%s" % (
@@ -1289,13 +1344,17 @@ def process(rec):
     if full_360:
         # ── Step 1: HY-Pano 2.0 → panorama ────────────────────────────
         pano_path = generate_panorama(slug, orig_filename)
-        if pano_path and os.path.exists(pano_path) and os.path.getsize(pano_path) > 0:
+        if pano_path and pano_is_valid(pano_path):
+            # ── Step 1b: subir pano a PB YA (habilita visor 360 en el front
+            #    mientras WorldMirror genera el modelo 3D) ──────────────
+            sync_pano_to_pb(slug, rid, pano_path, force=force)
             # ── Step 2: extract multiview from panorama ──────────────
             view_paths = extract_multiview_from_panorama(slug, orig_filename, n_views=9)
             if not view_paths:
                 log.warning("  [%s] multiview falló — usando solo frente" % slug)
         else:
             log.warning("  [%s] HY-Pano no generó panorama — usando solo frente" % slug)
+            set_json_fields(rid, pano_status="error")
 
     # ── Front-only: preparar imagen de frente como vista unica ────────
     # Se usa cuando full_360=False, o como fallback si el 360 falló.
@@ -1381,7 +1440,8 @@ def parse_records(items):
             "status": raw.get("status", "pending"),
             "settings":      raw.get("settings", {}) or {},
             "regenerate":    bool(raw.get("regenerate", False)),
-            "input_type":    raw.get("input_type", "image"),
+            "input_type":    raw.get("input_type") or "image",
+            "input_type_explicit": bool(raw.get("input_type")),
             "project_type":  raw.get("project_type", "space"),
             "files":         it.get("files", []) or [],
         })

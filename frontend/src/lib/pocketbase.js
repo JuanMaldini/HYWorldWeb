@@ -1,6 +1,7 @@
 import PocketBase from 'pocketbase'
 
-const PB_URL = import.meta.env.VITE_PB_URL || import.meta.env.VITE_PB_URL_LOCAL || 'http://localhost:8092'
+// URLs hardcodeadas: build de produccion (Vercel) -> deploy; dev local -> localhost
+const PB_URL = import.meta.env.PROD ? 'https://pocketbase.vmoliver.cloud' : 'http://localhost:8092'
 
 export const pb = new PocketBase(PB_URL)
 

@@ -1,3 +1,8 @@
 # Auto detect text files and perform LF normalization
 * text=auto
 *.onnx filter=lfs diff=lfs merge=lfs -text
+
+# Scripts que corren dentro de Linux/Docker: siempre LF
+*.sh text eol=lf
+Dockerfile text eol=lf
+docker-compose.yml text eol=lf

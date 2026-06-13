@@ -1,15 +1,28 @@
-# Env
+# Env (el .env.example si se commitea)
 .env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+
+# Node
+node_modules/
+pnpm-debug.log*
 
 # Local data (never commit)
 logs/
 projects/
+models/
 *.log
 
 # Build output
 dist/
 .next/
+frontend/dist/
 
 # Temp
 .DS_Store
 Thumbs.db
+*.tmp

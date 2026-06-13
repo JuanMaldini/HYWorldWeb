@@ -23,14 +23,7 @@ if _HYWORLD not in sys.path:
 if _PANOGEN not in sys.path:
     sys.path.insert(0, _PANOGEN)
 
-# ── Cargar .env ───────────────────────────────────────────
-_ENV_FILE = "/c/HyWorldWebData/.env"
-if os.path.exists(_ENV_FILE):
-    for line in open(_ENV_FILE, encoding="utf-8"):
-        line = line.strip()
-        if "=" in line and not line.startswith("#"):
-            k, v = line.split("=", 1)
-            os.environ.setdefault(k.strip(), v.strip())
+# (PB_URL / PB_ADMIN_TOKEN los inyecta docker-compose desde el .env del repo)
 
 # ── Ejecutar worker ───────────────────────────────────────
 WORKER_PATH = "/workspace/scripts/worker.py"

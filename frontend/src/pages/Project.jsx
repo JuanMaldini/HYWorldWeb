@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react'
 import { useParams, Link } from 'react-router-dom'
 import { api } from '../lib/pocketbase'
 import Viewer3D from '../components/Viewer3D'
+import Viewer360 from '../components/Viewer360'
 
 export default function Project({ user }) {
   const { slug } = useParams()
@@ -9,6 +10,7 @@ export default function Project({ user }) {
   const [loading, setLoading] = useState(true)
   const [updating, setUpdating] = useState(false)
   const [viewUrl, setViewUrl] = useState(null)
+  const [view360Url, setView360Url] = useState(null)
   const [settings, setSettings] = useState({})
   const [gen, setGen] = useState(false)
   const [deleteFileTarget, setDeleteFileTarget] = useState(null) // { url, filename }
@@ -99,7 +101,9 @@ export default function Project({ user }) {
   const files = project.files || []
   const isImg = (u) => /\.(jpg|jpeg|png|webp)$/i.test(u.split('?')[0])
   const isModel = (u) => /\.(glb|gltf)$/i.test(u.split('?')[0])
-  const imgs = files.filter(isImg)
+  const isPano = (u) => isImg(u) && /_pano/i.test(decodeURIComponent(u.split('?')[0].split('/').pop()))
+  const panos = files.filter(isPano)
+  const imgs = files.filter(u => isImg(u) && !isPano(u))
   const outs = files.filter(isModel)
 
   return (
@@ -166,7 +170,7 @@ export default function Project({ user }) {
         </div>
 
         {/* GenStatus */}
-        <GenStatus status={project.status} />
+        <GenStatus status={project.status} hasPano={panos.length > 0} />
 
         {/* 2-column layout */}
         <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0,340px) 1fr', gap: 24, alignItems: 'start' }}>
@@ -238,6 +242,49 @@ export default function Project({ user }) {
 
           {/* Right: Output */}
           <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+
+            {/* Panorama 360 */}
+            {panos.length > 0 && (
+              <div>
+                <div style={{ fontSize: 11, color: 'var(--text-dim)', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: 10 }}>
+                  Vista 360
+                </div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                  {panos.map((src, i) => {
+                    const rawName = src.split('/').pop()
+                    const fname = decodeURIComponent(rawName.split('?')[0])
+                    return (
+                      <div key={i} style={{
+                        display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12,
+                        background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 8, padding: '11px 16px',
+                      }}>
+                        <span style={{ fontSize: 13, fontFamily: 'monospace', color: 'var(--text)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                          🌐 {fname}
+                        </span>
+                        <span style={{ display: 'flex', gap: 12, flexShrink: 0, alignItems: 'center' }}>
+                          <button onClick={() => setView360Url(src)}
+                            style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 12, color: 'var(--cyan)', fontWeight: 600, padding: 0 }}>
+                            Ver 360
+                          </button>
+                          <a href={src} download style={{ fontSize: 12, color: 'var(--accent)', fontWeight: 600, textDecoration: 'none' }}>
+                            Descargar
+                          </a>
+                          {user && (
+                            <button
+                              onClick={() => setDeleteFileTarget({ url: src, filename: rawName.split('?')[0] })}
+                              style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 12, color: 'var(--danger)', fontWeight: 600, padding: 0 }}
+                              title="Eliminar panorama"
+                            >
+                              🗑
+                            </button>
+                          )}
+                        </span>
+                      </div>
+                    )
+                  })}
+                </div>
+              </div>
+            )}
 
             {/* Models */}
             {outs.length > 0 && (
@@ -313,7 +360,7 @@ export default function Project({ user }) {
           <div className="modal" onClick={e => e.stopPropagation()} style={{ maxWidth: 380 }}>
             <div style={{ textAlign: 'center', marginBottom: 24 }}>
               <div style={{ fontSize: 36, marginBottom: 12 }}>⚠️</div>
-              <h2 style={{ fontSize: 18, marginBottom: 8 }}>¿Eliminar modelo?</h2>
+              <h2 style={{ fontSize: 18, marginBottom: 8 }}>¿Eliminar archivo?</h2>
               <p style={{ color: 'var(--text-dim)', fontSize: 14 }}>
                 <strong>{decodeURIComponent(deleteFileTarget.filename)}</strong> será eliminado permanentemente.
               </p>
@@ -336,6 +383,7 @@ export default function Project({ user }) {
       )}
 
       {viewUrl && <Viewer3D url={viewUrl} onClose={() => setViewUrl(null)} />}
+      {view360Url && <Viewer360 url={view360Url} onClose={() => setView360Url(null)} />}
     </div>
   )
 }
@@ -354,7 +402,7 @@ const DEF = {
   texture: false,
 }
 
-function GenStatus({ status }) {
+function GenStatus({ status, hasPano }) {
   const [sec, setSec] = useState(0)
   useEffect(() => {
     if (status !== 'processing') { setSec(0); return }
@@ -368,7 +416,7 @@ function GenStatus({ status }) {
   const ss = String(sec % 60).padStart(2, '0')
   const cfg = {
     pending:    { t: 'En espera de procesamiento', d: 'El worker lo tomará en el próximo ciclo.', dot: 'dot-wait', bar: false },
-    processing: { t: `Generando 3D — ${mm}:${ss}`, d: 'Reconstruyendo en GPU. Puede tardar varios minutos.', dot: 'dot-proc', bar: true },
+    processing: { t: `Generando 3D — ${mm}:${ss}`, d: hasPano ? 'Reconstruyendo en GPU. El panorama 360 ya está disponible abajo mientras tanto.' : 'Reconstruyendo en GPU. Puede tardar varios minutos.', dot: 'dot-proc', bar: true },
     error:      { t: 'Error en la última generación', d: 'Se conservó el resultado anterior. Pulsa Generate para reintentar.', dot: '', bar: false },
   }[status] || { t: status, d: '', dot: '', bar: false }
 

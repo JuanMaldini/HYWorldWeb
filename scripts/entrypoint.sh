@@ -11,7 +11,6 @@ HYWORLD_DATA="/c/HyWorldWebData"
 PROJECTS_DIR="$HYWORLD_DATA/projects"
 LOGS_DIR="$HYWORLD_DATA/logs"
 MODELS_DIR="$HYWORLD_DATA/models"
-ENV_FILE="$HYWORLD_DATA/.env"
 
 # Apuntar HuggingFace al volumen persistente (evita re-descarga en cada arranque)
 export HF_HOME="$MODELS_DIR"
@@ -21,14 +20,6 @@ export TRANSFORMERS_CACHE="$MODELS_DIR/hub"
 # ── Crear estructura de carpetas ───────────────────────────
 echo "[HYWorld] Init: creando estructura..."
 mkdir -p "$PROJECTS_DIR" "$LOGS_DIR" "$MODELS_DIR"
-
-# ── Cargar .env si existe ──────────────────────────────────
-if [ -f "$ENV_FILE" ]; then
-    echo "[HYWorld] Cargando variables desde $ENV_FILE"
-    set -a
-    source "$ENV_FILE"
-    set +a
-fi
 
 # ── Validar GPU ────────────────────────────────────────────
 echo "[HYWorld] Verificando GPU..."
@@ -81,7 +72,7 @@ echo "============================================================"
 # ── Verificar .env ─────────────────────────────────────────
 if [ -z "$PB_URL" ] || [ -z "$PB_ADMIN_TOKEN" ]; then
     echo "[HYWorld] ERROR: PB_URL o PB_ADMIN_TOKEN no estan definidos"
-    echo "[HYWorld] Edita C:/HyWorldWebData/.env y reinicia."
+    echo "[HYWorld] Edita el .env del repo y reinicia."
     tail -f /dev/null
 fi
 
