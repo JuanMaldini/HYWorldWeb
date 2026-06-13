@@ -73,7 +73,7 @@ if _PANOGEN not in sys.path:
 
 PB_URL         = os.environ.get("PB_URL", "https://pocketbase.vmoliver.cloud").strip().rstrip("/")
 PB_ADMIN_TOKEN = os.environ.get("PB_ADMIN_TOKEN", "").strip()
-COLLECTION     = "hyworld_data"
+COLLECTION     = os.environ.get("PB_DATA_COLLECTION", "hyworld_data").strip()
 POLL_INTERVAL  = 10  # segundos (hardcodeado)
 ASSET_SERVER   = os.environ.get("ASSET_SERVER_URL", "http://host.docker.internal:8081")
 
@@ -707,6 +707,9 @@ def run_ml(slug, settings=None, want_mesh=True):
     for k, v in (settings or {}).items():
         if k in ALLOWED and v is not None:
             kwargs[k] = v
+    # Alias del frontend: presets mandan max_points -> compress_pts_max_points
+    if (settings or {}).get("max_points") is not None:
+        kwargs["compress_pts_max_points"] = settings["max_points"]
 
     # Siempre guardar points.ply (necesario para generar GLB después)
     kwargs["save_points"] = True

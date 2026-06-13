@@ -3,6 +3,7 @@ import { useParams, Link } from 'react-router-dom'
 import { api } from '../lib/pocketbase'
 import Viewer3D from '../components/Viewer3D'
 import Viewer360 from '../components/Viewer360'
+import Pano360 from '../components/Pano360'
 
 export default function Project({ user }) {
   const { slug } = useParams()
@@ -50,13 +51,20 @@ export default function Project({ user }) {
     if (!project) return
     setUpdating(true)
     try {
-      await api.updateProjectStatus(project.id, !project.listo)
-      setProject(p => ({ ...p, listo: !p.listo }))
+      const on = !project.listo
+      await api.updateProjectStatus(project.id, on)
+      setProject(p => ({ ...p, listo: on, status: on ? 'pending' : p.status }))
     } catch (err) {
       console.error(err)
     } finally {
       setUpdating(false)
     }
+  }
+
+  const applyPreset = async (name) => {
+    const newSettings = { ...settings, ...PRESETS[name] }
+    setSettings(newSettings)
+    try { await api.updateProjectSettings(project.id, newSettings) } catch (e) { console.error(e) }
   }
 
   const handleGenerate = async () => {
@@ -101,7 +109,12 @@ export default function Project({ user }) {
   const files = project.files || []
   const isImg = (u) => /\.(jpg|jpeg|png|webp)$/i.test(u.split('?')[0])
   const isModel = (u) => /\.(glb|gltf)$/i.test(u.split('?')[0])
-  const isPano = (u) => isImg(u) && /_pano/i.test(decodeURIComponent(u.split('?')[0].split('/').pop()))
+  // Panorama equirectangular subido por el worker: <nombre>_pano.png
+  // (PocketBase agrega sufijo aleatorio: <nombre>_pano_xxxxxxxx.png)
+  const isPano = (u) => {
+    const f = decodeURIComponent(u.split('?')[0].split('/').pop()).toLowerCase()
+    return f.includes('_pano') && f.endsWith('.png')
+  }
   const panos = files.filter(isPano)
   const imgs = files.filter(u => isImg(u) && !isPano(u))
   const outs = files.filter(isModel)
@@ -113,13 +126,11 @@ export default function Project({ user }) {
         <Link to="/" style={{ color: 'var(--accent)', fontSize: 20, textDecoration: 'none' }}>←</Link>
         <h1 style={{ fontSize: 16, fontWeight: 600, flex: 1 }}>{project.name}</h1>
         <span className={`status status-${project.status}`}>{project.status}</span>
-        {user && (
-          <button className="btn" onClick={handleGenerate}
-            disabled={gen || project.status === 'processing' || project.status === 'pending'}
-            style={{ marginLeft: 12 }}>
-            {gen ? 'Enviando...' : project.status === 'processing' ? 'Generando...' : project.status === 'pending' ? 'En espera...' : 'Generate'}
-          </button>
-        )}
+        <button className="btn" onClick={handleGenerate}
+          disabled={!user || gen || project.status === 'processing'}
+          style={{ marginLeft: 12, ...(!user && { opacity: 0.5, pointerEvents: 'none' }) }}>
+          {gen ? 'Enviando...' : project.status === 'processing' ? 'Generando...' : project.status === 'pending' ? 'En cola — reenviar' : 'Generate'}
+        </button>
       </div>
 
       <div style={{ padding: '20px 40px', maxWidth: 1100, margin: '0 auto' }}>
@@ -214,14 +225,41 @@ export default function Project({ user }) {
                 </div>
               </>
             ) : (
-              /* ── Space settings: 360 toggle (disabled) ── */
+              /* ── Space settings: presets + 360 toggle ── */
               <>
-                <div style={{
-                  display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12,
-                  background: 'var(--bg-dark)', border: `1px solid ${sval('full_360') ? 'var(--accent)' : 'var(--border)'}`,
-                  borderRadius: 8, padding: '12px 14px',
-                  pointerEvents: 'none', opacity: 0.5, cursor: 'default', userSelect: 'none',
-                }}>
+                <div style={{ display: 'flex', gap: 8, marginBottom: 14 }}>
+                  {Object.keys(PRESETS).map(name => {
+                    const active = Object.entries(PRESETS[name]).every(([k, v]) => sval(k) === v)
+                    return (
+                      <button key={name} onClick={() => applyPreset(name)} disabled={!user}
+                        style={{
+                          flex: 1, padding: '7px 0', fontSize: 12, fontWeight: 600,
+                          background: active ? 'var(--accent)' : 'var(--bg-dark)',
+                          color: active ? '#fff' : 'var(--text-dim)',
+                          border: `1px solid ${active ? 'var(--accent)' : 'var(--border)'}`,
+                          borderRadius: 7, transition: 'all 0.2s',
+                          cursor: user ? 'pointer' : 'default',
+                          ...(!user && { opacity: 0.5, pointerEvents: 'none' }),
+                        }}>
+                        {name}
+                      </button>
+                    )
+                  })}
+                </div>
+                <div
+                  onClick={user ? async () => {
+                    const new360 = !sval('full_360')
+                    const newSettings = { ...settings, full_360: new360 }
+                    setSettings(newSettings)
+                    try { await api.updateProjectSettings(project.id, newSettings) } catch (e) { console.error(e) }
+                  } : undefined}
+                  style={{
+                    display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12,
+                    background: 'var(--bg-dark)', border: `1px solid ${sval('full_360') ? 'var(--accent)' : 'var(--border)'}`,
+                    borderRadius: 8, padding: '12px 14px', userSelect: 'none',
+                    cursor: user ? 'pointer' : 'default',
+                    ...(!user && { opacity: 0.5, pointerEvents: 'none' }),
+                  }}>
                   <span>
                     <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text)' }}>Generacion 360 completa</div>
                     <div style={{ fontSize: 12, color: 'var(--text-dim)', marginTop: 2 }}>
@@ -242,49 +280,6 @@ export default function Project({ user }) {
 
           {/* Right: Output */}
           <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-
-            {/* Panorama 360 */}
-            {panos.length > 0 && (
-              <div>
-                <div style={{ fontSize: 11, color: 'var(--text-dim)', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: 10 }}>
-                  Vista 360
-                </div>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                  {panos.map((src, i) => {
-                    const rawName = src.split('/').pop()
-                    const fname = decodeURIComponent(rawName.split('?')[0])
-                    return (
-                      <div key={i} style={{
-                        display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12,
-                        background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 8, padding: '11px 16px',
-                      }}>
-                        <span style={{ fontSize: 13, fontFamily: 'monospace', color: 'var(--text)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                          🌐 {fname}
-                        </span>
-                        <span style={{ display: 'flex', gap: 12, flexShrink: 0, alignItems: 'center' }}>
-                          <button onClick={() => setView360Url(src)}
-                            style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 12, color: 'var(--cyan)', fontWeight: 600, padding: 0 }}>
-                            Ver 360
-                          </button>
-                          <a href={src} download style={{ fontSize: 12, color: 'var(--accent)', fontWeight: 600, textDecoration: 'none' }}>
-                            Descargar
-                          </a>
-                          {user && (
-                            <button
-                              onClick={() => setDeleteFileTarget({ url: src, filename: rawName.split('?')[0] })}
-                              style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 12, color: 'var(--danger)', fontWeight: 600, padding: 0 }}
-                              title="Eliminar panorama"
-                            >
-                              🗑
-                            </button>
-                          )}
-                        </span>
-                      </div>
-                    )
-                  })}
-                </div>
-              </div>
-            )}
 
             {/* Models */}
             {outs.length > 0 && (
@@ -329,6 +324,36 @@ export default function Project({ user }) {
               </div>
             )}
 
+            {/* 360 panorama viewer */}
+            {panos.length > 0 && (
+              <div>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
+                  <span style={{ fontSize: 11, color: 'var(--text-dim)', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+                    360°
+                  </span>
+                  <span style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
+                    <button onClick={() => setView360Url(panos[0])}
+                      style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 12, color: 'var(--cyan)', fontWeight: 600, padding: 0 }}>
+                      Pantalla completa
+                    </button>
+                    <a href={panos[0]} download style={{ fontSize: 12, color: 'var(--accent)', fontWeight: 600, textDecoration: 'none' }}>
+                      Descargar
+                    </a>
+                    {user && (
+                      <button
+                        onClick={() => setDeleteFileTarget({ url: panos[0], filename: panos[0].split('/').pop().split('?')[0] })}
+                        style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 12, color: 'var(--danger)', fontWeight: 600, padding: 0 }}
+                        title="Eliminar panorama"
+                      >
+                        🗑
+                      </button>
+                    )}
+                  </span>
+                </div>
+                <Pano360 url={panos[0]} />
+              </div>
+            )}
+
             {/* Images */}
             {imgs.length > 0 && (
               <div>
@@ -345,7 +370,7 @@ export default function Project({ user }) {
               </div>
             )}
 
-            {imgs.length === 0 && outs.length === 0 && (
+            {imgs.length === 0 && outs.length === 0 && panos.length === 0 && (
               <div style={{ color: 'var(--text-faint)', textAlign: 'center', padding: 32 }}>
                 No files yet
               </div>
@@ -388,11 +413,20 @@ export default function Project({ user }) {
   )
 }
 
+// Presets de calidad — solo target_size/max_resolution/max_points.
+// full_360 es independiente: se controla con su propio toggle.
+const PRESETS = {
+  MIN: { target_size: 512,  max_resolution: 1024, max_points: 1000000 },
+  MED: { target_size: 768,  max_resolution: 1920, max_points: 2500000 },
+  MAX: { target_size: 1120, max_resolution: 2560, max_points: 4000000 },
+}
+
 // Defaults — siempre máxima calidad y resolución
 const DEF = {
   full_360: false,
   target_size: 1120,
   max_resolution: 2560,
+  max_points: 4000000,
   apply_sky_mask: true,
   apply_edge_mask: true,
   apply_confidence_mask: false,
@@ -416,7 +450,7 @@ function GenStatus({ status, hasPano }) {
   const ss = String(sec % 60).padStart(2, '0')
   const cfg = {
     pending:    { t: 'En espera de procesamiento', d: 'El worker lo tomará en el próximo ciclo.', dot: 'dot-wait', bar: false },
-    processing: { t: `Generando 3D — ${mm}:${ss}`, d: hasPano ? 'Reconstruyendo en GPU. El panorama 360 ya está disponible abajo mientras tanto.' : 'Reconstruyendo en GPU. Puede tardar varios minutos.', dot: 'dot-proc', bar: true },
+    processing: { t: `Generando 3D — ${mm}:${ss}`, d: hasPano ? 'Reconstruyendo en GPU. El panorama 360 ya está disponible abajo.' : 'Reconstruyendo en GPU. Puede tardar varios minutos.', dot: 'dot-proc', bar: true },
     error:      { t: 'Error en la última generación', d: 'Se conservó el resultado anterior. Pulsa Generate para reintentar.', dot: '', bar: false },
   }[status] || { t: status, d: '', dot: '', bar: false }
 

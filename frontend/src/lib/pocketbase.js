@@ -107,7 +107,8 @@ export const api = {
       const current = await pbFetch(`/api/collections/hyworld_data/records/${id}`)
       parsed = typeof current.json === 'string' ? JSON.parse(current.json) : current.json
     } catch {}
-    const jsonData = { ...parsed, listo }
+    // ON => el proyecto queda 'pending' (a la espera del worker, aunque no este activo)
+    const jsonData = { ...parsed, listo, status: listo ? 'pending' : (parsed.status === 'processing' ? 'processing' : parsed.status || 'pending') }
     return pbFetch(`/api/collections/hyworld_data/records/${id}`, {
       method: 'PATCH',
       body: JSON.stringify({ json: JSON.stringify(jsonData) }),
