@@ -23,6 +23,11 @@ Start: python scripts/worker.py
 
 import os
 import sys
+
+# CUDA: reduce la fragmentacion del allocator (menos OOM por fragmentacion).
+# Debe fijarse ANTES de importar torch (que se importa de forma perezosa abajo).
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
 import json
 import time
 import glob
@@ -77,9 +82,64 @@ COLLECTION     = os.environ.get("PB_DATA_COLLECTION", "hyworld_data").strip()
 POLL_INTERVAL  = 10  # segundos (hardcodeado)
 ASSET_SERVER   = os.environ.get("ASSET_SERVER_URL", "http://host.docker.internal:8081")
 
+# ── Perfil adaptativo de hardware (8GB ↔ 24GB) ─────────────────────────
+# hw_profile.py vive junto a este script. SCRIPT_DIR suele estar en sys.path
+# al ejecutar `python scripts/worker.py`, pero lo aseguramos por si acaso.
+if SCRIPT_DIR not in sys.path:
+    sys.path.insert(0, SCRIPT_DIR)
+try:
+    from hw_profile import (detect_hardware, select_profile,
+                            downgrade_profile, clamp_settings_to_profile)
+    _HW_PROFILE_OK = True
+except Exception as _hw_err:
+    _HW_PROFILE_OK = False
+    _HW_IMPORT_ERR = _hw_err
+
+# Perfil activo (se fija en check_ml_env). Si el modulo falla, queda None y el
+# worker usa los defaults historicos (comportamiento previo intacto).
+PROFILE = None
+
 # Global pipeline instances (loaded once, reused)
 _PIPELINE_HYPOANO = None   # HunyuanPanoPipeline (loaded on demand)
 _PIPELINE_WORLD   = None   # WorldMirrorPipeline  (loaded once in run_ml)
+
+
+# ── Helpers de memoria GPU ─────────────────────────────────────────────
+def free_vram():
+    """Libera cache CUDA + recolecta basura. Seguro aunque no haya torch/CUDA."""
+    try:
+        import gc
+        import torch
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+    except Exception:
+        pass
+
+
+def _unload_pano_pipeline():
+    """Descarga HY-Pano de VRAM (residencia secuencial en GPUs chicas).
+
+    Se reconstruye en el siguiente proyecto. Cuesta tiempo de recarga, pero
+    evita tener HY-Pano + WorldMirror residentes a la vez (causa de OOM en 8GB).
+    """
+    global _PIPELINE_HYPOANO
+    if _PIPELINE_HYPOANO is not None:
+        try:
+            del _PIPELINE_HYPOANO
+        except Exception:
+            pass
+        _PIPELINE_HYPOANO = None
+        free_vram()
+        log.info("  residencia secuencial: HY-Pano descargado de VRAM")
+
+
+def _is_oom_error(e):
+    """Heuristica: ¿la excepcion es un out-of-memory / fallo de allocator CUDA?"""
+    s = ("%s" % e).lower()
+    return ("out of memory" in s or "cuda error" in s or "cublas" in s
+            or "cudnn" in s or "alloc" in s or "cufft" in s)
 
 # ── Logging ──────────────────────────────────────────────────────────────
 log_file = os.path.join(LOGS_DIR, "worker_" + datetime.now().strftime("%Y%m%d") + ".log")
@@ -215,19 +275,42 @@ def check_ml_env():
         log.info("RAM      : %.1f GB total | %.1f GB libre" % (vm.total / 1e9, vm.available / 1e9))
     except Exception:
         pass
+    global PROFILE
     ok, reason = False, ""
+    vram_gb = 0.0
     try:
         import torch
         cuda = torch.cuda.is_available()
         log.info("PyTorch  : %s | CUDA: %s" % (torch.__version__, cuda))
         if cuda:
-            log.info("GPU      : %s" % torch.cuda.get_device_name(0))
+            props = torch.cuda.get_device_properties(0)
+            vram_gb = props.total_memory / 1e9
+            log.info("GPU      : %s (%.1f GB VRAM)" % (props.name, vram_gb))
         else:
             log.warning("CUDA no disponible")
     except Exception as e:
         reason = "torch no importable: %s" % e
         log.error("PyTorch  : %s" % reason)
         return False, reason
+
+    # ── Seleccion de perfil adaptativo segun VRAM/RAM detectada ──────────
+    if _HW_PROFILE_OK:
+        try:
+            dv, dram, gname, dcuda = detect_hardware()
+            vram_gb = dv or vram_gb
+            ram_gb = dram
+            try:
+                import psutil
+                ram_gb = ram_gb or (psutil.virtual_memory().total / 1e9)
+            except Exception:
+                pass
+            PROFILE = select_profile(vram_gb, ram_gb, gname, cuda)
+            log.info("PERFIL   : %s" % PROFILE.summary())
+        except Exception as e:
+            PROFILE = None
+            log.warning("PERFIL   : fallo al seleccionar (%s) — usando defaults" % e)
+    else:
+        log.warning("PERFIL   : hw_profile no disponible (%s) — usando defaults" % _HW_IMPORT_ERR)
     if not os.path.isdir(HYWORLD_DIR):
         reason = "no existe %s" % HYWORLD_DIR
         log.error("hyworld2 : %s" % reason)
@@ -493,12 +576,19 @@ def generate_panorama(slug, orig_filename):
             log.error("  [%s] pano: FALLO al cargar HY-Pano: %s" % (slug, e))
             return None
 
+    # Parametros del panorama segun perfil de hardware (resolucion/steps).
+    _ph = PROFILE.pano_height if PROFILE else 1024
+    _pw = PROFILE.pano_width  if PROFILE else 2048
+    _psteps = PROFILE.pano_steps if PROFILE else 50
+    log.info("  [%s] pano: %dx%d, %d steps (perfil=%s)" % (
+        slug, _pw, _ph, _psteps, PROFILE.tier if PROFILE else "default"))
+
     try:
         result = _PIPELINE_HYPOANO(
             image=input_file,
-            height=1024,
-            width=2048,
-            diff_infer_steps=50,
+            height=_ph,
+            width=_pw,
+            diff_infer_steps=_psteps,
             blend_width=32,
             verbose=2,
             seed=random.randint(0, 2**31),
@@ -689,9 +779,10 @@ def run_ml(slug, settings=None, want_mesh=True):
         log.error("  [%s] run_ml: sin views en %s" % (slug, views_dir))
         return None
 
-    global _PIPELINE_WORLD
+    global _PIPELINE_WORLD, PROFILE
     if _PIPELINE_WORLD is None:
         log.info("  [%s] run_ml: cargando WorldMirrorPipeline (solo la primera vez)..." % slug)
+        free_vram()  # asegura VRAM libre antes de cargar (residencia secuencial)
         from hyworld2.worldrecon.pipeline import WorldMirrorPipeline
         _PIPELINE_WORLD = WorldMirrorPipeline.from_pretrained(
             "tencent/HY-World-2.0", enable_bf16=True)
@@ -703,46 +794,81 @@ def run_ml(slug, settings=None, want_mesh=True):
         "save_gs", "save_points", "save_depth", "save_normal", "save_camera",
         "compress_pts", "compress_pts_max_points",
     }
-    kwargs = {"strict_output_path": output_dir}
-    for k, v in (settings or {}).items():
-        if k in ALLOWED and v is not None:
-            kwargs[k] = v
-    # Alias del frontend: presets mandan max_points -> compress_pts_max_points
-    if (settings or {}).get("max_points") is not None:
-        kwargs["compress_pts_max_points"] = settings["max_points"]
 
-    # Siempre guardar points.ply (necesario para generar GLB después)
-    kwargs["save_points"] = True
-    kwargs.setdefault("apply_sky_mask", True)
-    kwargs.setdefault("apply_edge_mask", True)
-    kwargs.setdefault("max_resolution", 2560)
-    kwargs.setdefault("target_size", 1120)
-    kwargs.setdefault("compress_pts_max_points", 4_000_000)
+    def _build_kwargs(prof):
+        """Construye los kwargs del pipeline para un perfil dado.
 
-    log.info("  [%s] run_ml: %d views. Ajustes=%s" % (
-        slug, len(views), {k: v for k, v in kwargs.items()
-                           if k != "strict_output_path"}))
+        Orden de prioridad: defaults del perfil  ->  settings del usuario
+        (acotados al techo del perfil)  ->  flags fijos del worker.
+        Si no hay perfil, replica el comportamiento historico.
+        """
+        if prof is not None and _HW_PROFILE_OK:
+            kw = clamp_settings_to_profile(settings, prof)
+        else:
+            kw = {}
+            for k, v in (settings or {}).items():
+                if k in ALLOWED and v is not None:
+                    kw[k] = v
+            if (settings or {}).get("max_points") is not None:
+                kw["compress_pts_max_points"] = settings["max_points"]
+            kw.setdefault("max_resolution", 2560)
+            kw.setdefault("target_size", 1120)
+            kw.setdefault("compress_pts_max_points", 4_000_000)
+        # Flags fijos del worker (siempre)
+        kw["strict_output_path"] = output_dir
+        kw["save_points"] = True               # points.ply requerido para el GLB
+        kw.setdefault("apply_sky_mask", True)
+        kw.setdefault("apply_edge_mask", True)
+        return kw
 
-    try:
-        result = _PIPELINE_WORLD(views_dir, **kwargs)
-        if not result:
-            log.error("  [%s] run_ml: pipeline devolvio None" % slug)
+    # ── Inferencia con recuperacion de OOM: si revienta por memoria, bajamos
+    #    un escalon de perfil y reintentamos el MISMO proyecto (sin tumbar la
+    #    cola). Solo se degrada ante OOM; otros errores se propagan. ─────────
+    attempt_prof = PROFILE
+    max_attempts = 4
+    result = None
+    for attempt in range(1, max_attempts + 1):
+        kwargs = _build_kwargs(attempt_prof)
+        tier = attempt_prof.tier if attempt_prof else "default"
+        log.info("  [%s] run_ml: intento %d/%d (perfil=%s) %d views. Ajustes=%s" % (
+            slug, attempt, max_attempts, tier, len(views),
+            {k: v for k, v in kwargs.items() if k != "strict_output_path"}))
+        try:
+            result = _PIPELINE_WORLD(views_dir, **kwargs)
+            if not result:
+                log.error("  [%s] run_ml: pipeline devolvio None" % slug)
+                return None
+            log.info("  [%s] run_ml: pipeline completado -> %s" % (slug, result))
+            break
+        except Exception as e:
+            is_oom = _is_oom_error(e)
+            nxt = downgrade_profile(attempt_prof) if (is_oom and attempt_prof and _HW_PROFILE_OK) else None
+            if is_oom and nxt is not None:
+                log.warning("  [%s] run_ml: OOM en perfil '%s' — bajando a '%s' y reintentando" % (
+                    slug, tier, nxt.tier))
+                free_vram()
+                attempt_prof = nxt
+                continue
+            log.error("  [%s] run_ml: FALLO%s: %s\n%s" % (
+                slug, " (OOM, sin mas downgrade)" if is_oom else "",
+                e, traceback.format_exc()))
             return None
-        log.info("  [%s] run_ml: pipeline completado -> %s" % (slug, result))
-    except Exception as e:
-        log.error("  [%s] run_ml: FALLO: %s\n%s" % (slug, e, traceback.format_exc()))
-        return None
+
+    # Perfil efectivo con el que se logro la reconstruccion (para el GLB)
+    eff_prof = attempt_prof
 
     if want_mesh:
         try:
-            export_glb_from_ply(slug)
+            glb_step = eff_prof.glb_step if eff_prof else 2
+            export_glb_from_ply(slug, glb_step=glb_step)
         except Exception as e:
             log.error("  [%s] mesh GLB FALLO: %s\n%s" % (slug, e, traceback.format_exc()))
 
+    free_vram()  # deja VRAM limpia para el siguiente proyecto de la cola
     return output_dir
 
 
-def export_glb_from_ply(slug):
+def export_glb_from_ply(slug, glb_step=2):
     """Genera mesh.glb desde depth map + imagen de vista (malla 3D real con colores).
     Proyecta cada pixel del depth map al espacio 3D usando los intrinsecos de camara,
     conecta pixeles adyacentes con triangulos filtrando discontinuidades de profundidad.
@@ -793,8 +919,9 @@ def export_glb_from_ply(slug):
             depth = depth[..., 0]
         depth = depth.astype(np.float32)
 
-        # Submuestreo: step=2 → 4x menos vertices/triangulos, GLB ~7 MB vs 28 MB
-        STEP = 2
+        # Submuestreo configurable (glb_step): 1=maxima densidad (GPUs grandes),
+        # 2=balance (~4x menos verts/tris), 3=ligero (GPUs chicas).
+        STEP = max(1, int(glb_step))
         depth = depth[::STEP, ::STEP]
 
         img = np.array(Image.open(view_path).convert("RGB"))
@@ -1352,7 +1479,8 @@ def process(rec):
             #    mientras WorldMirror genera el modelo 3D) ──────────────
             sync_pano_to_pb(slug, rid, pano_path, force=force)
             # ── Step 2: extract multiview from panorama ──────────────
-            view_paths = extract_multiview_from_panorama(slug, orig_filename, n_views=9)
+            _nviews = PROFILE.n_views if PROFILE else 9
+            view_paths = extract_multiview_from_panorama(slug, orig_filename, n_views=_nviews)
             if not view_paths:
                 log.warning("  [%s] multiview falló — usando solo frente" % slug)
         else:
@@ -1367,6 +1495,11 @@ def process(rec):
             log.error("  [%s] no se pudo preparar entrada para WorldMirror" % slug)
             set_status(rid, "error")
             return
+
+    # ── Residencia secuencial: en GPUs chicas, descargar HY-Pano de VRAM
+    #    antes de cargar WorldMirror (evita tener ambos modelos residentes). ─
+    if PROFILE and PROFILE.sequential_residency:
+        _unload_pano_pipeline()
 
     # ── Step 3: WorldMirror 2.0 (siempre lee de projects/<slug>/views) ─
     output_dir = None
@@ -1549,3 +1682,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+# (perfil adaptativo de hardware integrado)
