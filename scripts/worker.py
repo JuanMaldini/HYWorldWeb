@@ -26,7 +26,26 @@ import sys
 
 # CUDA: reduce la fragmentacion del allocator (menos OOM por fragmentacion).
 # Debe fijarse ANTES de importar torch (que se importa de forma perezosa abajo).
-os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+# OJO: 'expandable_segments:True' provoca "CUDA driver error: device not ready"
+# y "!handles_.at(i) INTERNAL ASSERT" en WSL2 + offload de accelerate (HY-Pano se
+# descarga a CPU/disco). Lo NEUTRALIZAMOS aunque venga impuesto por el entorno
+# (p.ej. docker-compose), porque os.environ.setdefault no sobreescribe.
+_alloc_conf = os.environ.get("PYTORCH_CUDA_ALLOC_CONF", "")
+if (not _alloc_conf) or ("expandable_segments" in _alloc_conf):
+    os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:256"
+
+# ── Logs limpios: silenciar el ruido de transformers/accelerate/HF ─────
+# (debe fijarse ANTES de importar torch/transformers). Esto elimina avisos
+# como "tie_word_embeddings", "Some parameters are on the meta device" y las
+# barras de progreso de descarga, que ensucian el log del worker.
+os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
+os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+import warnings as _warnings
+for _pat in (r".*generation_config.*", r".*max_new_tokens.*max_length.*",
+             r".*meta device.*", r".*tie_word_embeddings.*",
+             r".*is deprecated.*"):
+    _warnings.filterwarnings("ignore", message=_pat)
 
 import json
 import time
@@ -136,10 +155,16 @@ def _unload_pano_pipeline():
 
 
 def _is_oom_error(e):
-    """Heuristica: ¿la excepcion es un out-of-memory / fallo de allocator CUDA?"""
+    """Heuristica: ¿la excepcion es un OOM / fallo recuperable de allocator/driver CUDA?
+
+    Incluye 'device not ready' (cudaErrorNotReady) y errores de driver que en la
+    practica se resuelven liberando VRAM y reintentando con menos memoria.
+    """
     s = ("%s" % e).lower()
     return ("out of memory" in s or "cuda error" in s or "cublas" in s
-            or "cudnn" in s or "alloc" in s or "cufft" in s)
+            or "cudnn" in s or "alloc" in s or "cufft" in s
+            or "device not ready" in s or "driver error" in s
+            or "device-side assert" in s or "illegal memory" in s)
 
 # ── Logging ──────────────────────────────────────────────────────────────
 log_file = os.path.join(LOGS_DIR, "worker_" + datetime.now().strftime("%Y%m%d") + ".log")
@@ -269,6 +294,7 @@ def check_ml_env():
     log.info("PB token : %s" % ("OK" if PB_ADMIN_TOKEN else "FALTA"))
     log.info("Projects : %s" % PROJECTS_DIR)
     log.info("Poll     : cada %ss" % POLL_INTERVAL)
+    log.info("AllocConf: %s" % os.environ.get("PYTORCH_CUDA_ALLOC_CONF", "(default)"))
     try:
         import psutil
         vm = psutil.virtual_memory()
@@ -583,19 +609,29 @@ def generate_panorama(slug, orig_filename):
     log.info("  [%s] pano: %dx%d, %d steps (perfil=%s)" % (
         slug, _pw, _ph, _psteps, PROFILE.tier if PROFILE else "default"))
 
-    try:
-        result = _PIPELINE_HYPOANO(
-            image=input_file,
-            height=_ph,
-            width=_pw,
-            diff_infer_steps=_psteps,
-            blend_width=32,
-            verbose=2,
-            seed=random.randint(0, 2**31),
-        )
-    except Exception as e:
-        log.error("  [%s] pano: inference FALLO: %s\n%s" % (slug, e, traceback.format_exc()))
-        return None
+    # Hasta 2 intentos: un error de driver/OOM transitorio se suele resolver
+    # liberando VRAM y reintentando una vez. Si persiste, el caller cae a frente.
+    result = None
+    for _attempt in range(1, 3):
+        try:
+            result = _PIPELINE_HYPOANO(
+                image=input_file,
+                height=_ph,
+                width=_pw,
+                diff_infer_steps=_psteps,
+                blend_width=32,
+                verbose=0,  # 0 = sin dump de "Model input info"/tokens (logs limpios)
+                seed=random.randint(0, 2**31),
+            )
+            break
+        except Exception as e:
+            if _attempt == 1 and _is_oom_error(e):
+                log.warning("  [%s] pano: error CUDA recuperable (%s) — liberando VRAM y reintentando" % (
+                    slug, ("%s" % e)[:80]))
+                free_vram()
+                continue
+            log.error("  [%s] pano: inference FALLO: %s\n%s" % (slug, e, traceback.format_exc()))
+            return None
 
     try:
         if hasattr(result, "save"):

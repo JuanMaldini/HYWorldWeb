@@ -28,7 +28,10 @@ services:
       - "host.docker.internal:host-gateway"
     environment:
       - CUDA_VISIBLE_DEVICES=0
-      - PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+      # expandable_segments rompe en WSL2 + offload de accelerate (HY-Pano):
+      # "device not ready" / "!handles_.at(i) INTERNAL ASSERT" en el allocator.
+      # max_split_size_mb reduce fragmentacion sin ese fallo.
+      - PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:256
       - HYWORLD_DIR=/c/HyWorldWebData/repo
       - PROJECTS_DIR=/c/HyWorldWebData/projects
       - LOGS_DIR=/c/HyWorldWebData/logs
