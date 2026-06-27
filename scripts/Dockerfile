@@ -53,6 +53,13 @@ RUN pip install --no-cache-dir \
 # cupy
 RUN pip install --no-cache-dir cupy-cuda12x==13.6.0
 
+# onnxruntime (CPU) — usado por compute_sky_mask (skyseg.onnx) en worldmirror.
+# CPU a proposito: el wheel -gpu enlaza una libcudart de una CUDA distinta a la
+# de la imagen (12.8) y rompe el import. El modelo de sky-seg es chico y corre
+# bien en CPU. NO instalar onnxruntime-gpu aqui.
+RUN pip uninstall -y onnxruntime-gpu onnxruntime 2>/dev/null || true
+RUN pip install --no-cache-dir onnxruntime==1.20.1
+
 # gsplat - pinned al commit probado (RTX 30xx = sm_86)
 # Para otra GPU: RTX 20xx->7.5  RTX 40xx->8.9  A100->8.0
 ENV TORCH_CUDA_ARCH_LIST="8.6"

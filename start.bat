@@ -209,6 +209,23 @@ for /L %%i in (1,1,12) do (
 :container_up
 docker ps --filter "name=hyworld_ml" --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}" >>"%LOGFILE%" 2>&1
 
+:: -- 9b. Auto-fix dependencias ML del contenedor (idempotente) --
+:: onnxruntime lo usa compute_sky_mask (skyseg.onnx) en worldmirror.
+:: Debe ser CPU: el wheel -gpu enlaza libcudart de otra CUDA y rompe el import
+:: ("libcudart.so.13"). Ya esta en el Dockerfile; esto es red de seguridad por si
+:: la imagen viene pre-armada sin la dependencia. Si ya esta, no hace nada.
+%LOG% "Verificando dependencias ML del contenedor (onnxruntime)..."
+docker exec hyworld_ml python3.11 -c "import onnxruntime" >nul 2>&1
+if errorlevel 1 (
+    %LOG% "  onnxruntime ausente/roto - instalando CPU 1.20.1..."
+    docker exec hyworld_ml pip uninstall -y onnxruntime-gpu onnxruntime >>"%LOGFILE%" 2>&1
+    docker exec hyworld_ml pip install --no-cache-dir onnxruntime==1.20.1 >>"%LOGFILE%" 2>&1
+    docker exec hyworld_ml python3.11 -c "import onnxruntime as o; print('onnxruntime', o.__version__, 'OK')" >>"%LOGFILE%" 2>&1
+    %LOG% "  onnxruntime instalado"
+) else (
+    %LOG% "  onnxruntime OK"
+)
+
 :: -- 10. Iniciar Asset Server (Hunyuan3D-2) en background --
 set "ASSET_LOG=%DATA%\logs\asset_server.log"
 set "ASSET_SCRIPT=%DATA%\Hunyuan3D-2\api_server.py"
