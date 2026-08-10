@@ -290,3 +290,14 @@ code { font-family: 'JetBrains Mono', ui-monospace, monospace; }
   margin: 0 auto 14px;
 }
 @keyframes spin { to { transform: rotate(360deg); } }
+
+/* Indicador de modo local: estado esperado, no un aviso.
+   Icono discreto al lado del titulo, con tooltip explicativo. */
+.local-badge {
+  font-size: 0.6em;
+  margin-left: 0.5em;
+  opacity: 0.55;
+  cursor: help;
+  vertical-align: middle;
+}
+.local-badge:hover { opacity: 1; }

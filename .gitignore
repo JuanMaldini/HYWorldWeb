@@ -1,6 +1,13 @@
 # Env (el .env.example si se commitea)
 .env
 
+# scripts/.env lo regenera preflight.ps1 en cada arranque y contiene
+# secretos del worker (cuenta de servicio del PocketBase local).
+scripts/.env
+
+# frontend/.env.local lo regenera preflight.ps1 (VITE_PB_URL del backend)
+frontend/.env.local
+
 # Python
 __pycache__/
 *.pyc
@@ -12,6 +19,9 @@ node_modules/
 pnpm-debug.log*
 
 # Local data (never commit)
+# .data/ es TODO el estado local: modelos, repos clonados, proyectos,
+# logs y la base de PocketBase. Decenas de GB.
+.data/
 logs/
 projects/
 models/

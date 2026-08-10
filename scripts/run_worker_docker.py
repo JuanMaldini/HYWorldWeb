@@ -2,41 +2,44 @@
 """
 HYWorld — Run Inside Docker
 ===========================
-Wrapper que se ejecuta DENTRO del contenedor Docker.
-Fija las variables de entorno y ejecuta worker.py
+Wrapper que se ejecuta DENTRO del contenedor y lanza worker.py.
+
+Las rutas ya vienen del compose (HYWORLD_DIR / PROJECTS_DIR / LOGS_DIR,
+todas bajo /data). Aca solo se ponen defaults por si el contenedor se
+corre a mano sin compose, y se arma el sys.path.
 """
 
 import os
 import sys
 
-# ── Paths ─────────────────────────────────────────────────
-os.environ["HYWORLD_DIR"]   = r"/c/HyWorldWebData/repo"
-os.environ["PROJECTS_DIR"]  = r"/c/HyWorldWebData/projects"
-os.environ["LOGS_DIR"]     = r"/c/HyWorldWebData/logs"
-os.environ["PYTHONPATH"]    = r"/c/HyWorldWebData/repo/hyworld2/panogen:/c/HyWorldWebData/repo"
+DATA = "/data"
+
+# ── Defaults (el compose normalmente ya los define) ───────
+os.environ.setdefault("HYWORLD_DIR", DATA + "/repo")
+os.environ.setdefault("PROJECTS_DIR", DATA + "/projects")
+os.environ.setdefault("LOGS_DIR", DATA + "/logs")
+
+HYWORLD_DIR = os.environ["HYWORLD_DIR"]
+PANOGEN = os.path.join(HYWORLD_DIR, "hyworld2", "panogen")
+os.environ.setdefault("PYTHONPATH", PANOGEN + ":" + HYWORLD_DIR)
 
 # ── sys.path ───────────────────────────────────────────────
-_HYWORLD = r"/c/HyWorldWebData/repo"
-_PANOGEN = os.path.join(_HYWORLD, "hyworld2", "panogen")
-if _HYWORLD not in sys.path:
-    sys.path.insert(0, _HYWORLD)
-if _PANOGEN not in sys.path:
-    sys.path.insert(0, _PANOGEN)
-
-# (PB_URL / PB_ADMIN_TOKEN los inyecta docker-compose desde el .env del repo)
+for p in (HYWORLD_DIR, PANOGEN):
+    if p not in sys.path:
+        sys.path.insert(0, p)
 
 # ── Ejecutar worker ───────────────────────────────────────
 WORKER_PATH = "/workspace/scripts/worker.py"
 if not os.path.exists(WORKER_PATH):
-    print(f"[HYWorld] ERROR: worker.py no encontrado en {WORKER_PATH}")
+    print("[HYWorld] ERROR: worker.py no encontrado en %s" % WORKER_PATH)
     sys.exit(1)
 
-print(f"[HYWorld] Ejecutando worker:")
-print(f"  HYWORLD_DIR   = {os.environ.get('HYWORLD_DIR')}")
-print(f"  PROJECTS_DIR  = {os.environ.get('PROJECTS_DIR')}")
-print(f"  LOGS_DIR      = {os.environ.get('LOGS_DIR')}")
-print(f"  PB_URL        = {os.environ.get('PB_URL', 'NO CONFIGURADO')}")
-print(f"  PB_TOKEN      = {'OK' if os.environ.get('PB_ADMIN_TOKEN') else 'FALTA'}")
+print("[HYWorld] Ejecutando worker:")
+print("  HYWORLD_DIR   = %s" % os.environ["HYWORLD_DIR"])
+print("  PROJECTS_DIR  = %s" % os.environ["PROJECTS_DIR"])
+print("  LOGS_DIR      = %s" % os.environ["LOGS_DIR"])
+print("  PB_URL        = %s" % os.environ.get("PB_URL", "NO CONFIGURADO"))
+print("  PB_WORKER     = %s" % (os.environ.get("PB_WORKER_EMAIL") or "FALTA"))
 print()
 
 os.execv(sys.executable, [sys.executable, "-u", WORKER_PATH])

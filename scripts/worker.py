@@ -70,9 +70,10 @@ import requests
 # ── Paths ──────────────────────────────────────────────────────────────
 SCRIPT_DIR   = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR     = os.path.abspath(os.path.join(SCRIPT_DIR, ".."))
-PROJECTS_DIR = os.environ.get("PROJECTS_DIR", os.path.join(ROOT_DIR, "projects"))
-LOGS_DIR     = os.environ.get("LOGS_DIR", os.path.join(ROOT_DIR, "logs"))
-HYWORLD_DIR  = os.environ.get("HYWORLD_DIR", r"D:\GitHub\HY-World-2.0")
+DATA_DIR     = os.environ.get("HYWORLD_DATA", os.path.join(ROOT_DIR, ".data"))
+PROJECTS_DIR = os.environ.get("PROJECTS_DIR", os.path.join(DATA_DIR, "projects"))
+LOGS_DIR     = os.environ.get("LOGS_DIR", os.path.join(DATA_DIR, "logs"))
+HYWORLD_DIR  = os.environ.get("HYWORLD_DIR", os.path.join(DATA_DIR, "repo"))
 
 os.makedirs(PROJECTS_DIR, exist_ok=True)
 os.makedirs(LOGS_DIR, exist_ok=True)
@@ -95,11 +96,19 @@ if HYWORLD_DIR not in sys.path:
 if _PANOGEN not in sys.path:
     sys.path.insert(0, _PANOGEN)
 
-PB_URL         = os.environ.get("PB_URL", "https://pocketbase.vmoliver.cloud").strip().rstrip("/")
-PB_ADMIN_TOKEN = os.environ.get("PB_ADMIN_TOKEN", "").strip()
+# ── PocketBase ─────────────────────────────────────────────────────────
+PB_URL = os.environ.get("PB_URL", "").strip().rstrip("/")
+if not PB_URL:
+    PB_URL = ("http://pocketbase:8090" if os.path.exists("/.dockerenv")
+              else "http://localhost:8092")
+
+PB_AUTH_COLLECTION = os.environ.get("PB_AUTH_COLLECTION", "hyworld_user").strip()
+PB_WORKER_EMAIL    = os.environ.get("PB_WORKER_EMAIL", "").strip()
+PB_WORKER_PASSWORD = os.environ.get("PB_WORKER_PASSWORD", "")
+
 COLLECTION     = os.environ.get("PB_DATA_COLLECTION", "hyworld_data").strip()
-POLL_INTERVAL  = 10  # segundos (hardcodeado)
-ASSET_SERVER   = os.environ.get("ASSET_SERVER_URL", "http://host.docker.internal:8081")
+POLL_INTERVAL  = 10
+ASSET_SERVER   = os.environ.get("ASSET_SERVER_URL", "http://assets:8081")
 
 # ── Perfil adaptativo de hardware (8GB ↔ 24GB) ─────────────────────────
 # hw_profile.py vive junto a este script. SCRIPT_DIR suele estar en sys.path
@@ -108,7 +117,9 @@ if SCRIPT_DIR not in sys.path:
     sys.path.insert(0, SCRIPT_DIR)
 try:
     from hw_profile import (detect_hardware, select_profile,
-                            downgrade_profile, clamp_settings_to_profile)
+                            downgrade_profile, clamp_settings_to_profile,
+                            pano_fallback_ladder, effective_profile,
+                            publish_caps)
     _HW_PROFILE_OK = True
 except Exception as _hw_err:
     _HW_PROFILE_OK = False
@@ -154,6 +165,53 @@ def _unload_pano_pipeline():
         log.info("  residencia secuencial: HY-Pano descargado de VRAM")
 
 
+def _unload_world_pipeline():
+    """Descarga WorldMirror de VRAM — la mitad que faltaba de la residencia secuencial.
+
+    Sin esto, _PIPELINE_WORLD quedaba residente PARA SIEMPRE: el primer proyecto
+    de la cola funcionaba (VRAM limpia) pero en el segundo HY-Pano arrancaba con
+    WorldMirror todavia dentro. Ese es el patron clasico de "el primero va bien y
+    el segundo se congela" en GPUs de 8-10 GB.
+    """
+    global _PIPELINE_WORLD
+    if _PIPELINE_WORLD is not None:
+        try:
+            del _PIPELINE_WORLD
+        except Exception:
+            pass
+        _PIPELINE_WORLD = None
+        free_vram()
+        log.info("  residencia secuencial: WorldMirror descargado de VRAM")
+
+
+# ── Telemetria de VRAM ─────────────────────────────────────────────────
+# Sin esto los tiers de hw_profile.py estan puestos a ojo. Medir el pico real
+# por etapa es lo que permite subir la calidad con datos en vez de por corazonada.
+def vram_probe(reset=False):
+    """Devuelve (asignada_GB, pico_GB, total_GB). Si reset, reinicia el pico."""
+    try:
+        import torch
+        if not torch.cuda.is_available():
+            return (0.0, 0.0, 0.0)
+        if reset:
+            torch.cuda.reset_peak_memory_stats()
+        total = torch.cuda.get_device_properties(0).total_memory / 1e9
+        return (torch.cuda.memory_allocated() / 1e9,
+                torch.cuda.max_memory_allocated() / 1e9, total)
+    except Exception:
+        return (0.0, 0.0, 0.0)
+
+
+def log_vram(slug, stage):
+    """Registra el pico de VRAM de una etapa y lo reinicia para la siguiente."""
+    alloc, peak, total = vram_probe()
+    if total > 0:
+        log.info("  [%s] vram/%s: pico %.2f GB / %.1f GB (%.0f%%), en uso %.2f GB" % (
+            slug, stage, peak, total, 100.0 * peak / total, alloc))
+    vram_probe(reset=True)
+    return peak
+
+
 def _is_oom_error(e):
     """Heuristica: ¿la excepcion es un OOM / fallo recuperable de allocator/driver CUDA?
 
@@ -180,7 +238,7 @@ _sh = logging.StreamHandler(sys.stdout); _sh.setLevel(logging.DEBUG); _sh.setFor
 # Solo agregar FileHandler si el entrypoint NO está redirigiendo stdout al log.
 # En Docker, entrypoint.sh ya hace `exec > >(tee -a "$LOG_FILE")`, por lo que
 # agregar otro FileHandler al mismo archivo causaría que cada línea aparezca dos veces.
-_IN_DOCKER = os.path.exists("/.dockerenv") or os.environ.get("HYWORLD_DIR", "").startswith("/c/")
+_IN_DOCKER = os.path.exists("/.dockerenv") or os.environ.get("HYWORLD_DIR", "").startswith("/data")
 if not _IN_DOCKER:
     _fh = logging.FileHandler(log_file, encoding="utf-8"); _fh.setLevel(logging.DEBUG); _fh.setFormatter(_Fmt())
     log.handlers = [_fh, _sh]
@@ -291,7 +349,7 @@ def check_ml_env():
     log.info("Python   : %s  (%s)" % (platform.python_version(), sys.executable))
     log.info("Platform : %s %s" % (platform.system(), platform.release()))
     log.info("PB URL   : %s" % PB_URL)
-    log.info("PB token : %s" % ("OK" if PB_ADMIN_TOKEN else "FALTA"))
+    log.info("PB cuenta: %s" % (PB_WORKER_EMAIL or "FALTA"))
     log.info("Projects : %s" % PROJECTS_DIR)
     log.info("Poll     : cada %ss" % POLL_INTERVAL)
     log.info("AllocConf: %s" % os.environ.get("PYTORCH_CUDA_ALLOC_CONF", "(default)"))
@@ -356,33 +414,73 @@ def check_ml_env():
 # ─────────────────────────────────────────────────────────────────────
 # PocketBase helpers
 # ─────────────────────────────────────────────────────────────────────
-def _headers():
-    return {"Authorization": "Bearer " + PB_ADMIN_TOKEN} if PB_ADMIN_TOKEN else {}
+_pb_token = ""
+_pb_token_exp = 0.0
 
-def pb_get(path, retries=3):
+
+def _jwt_exp(token):
+    """Lee el 'exp' del JWT sin validar la firma. 0 si no se puede."""
+    try:
+        payload = token.split(".")[1]
+        payload += "=" * (-len(payload) % 4)          # padding base64url
+        return float(json.loads(base64.urlsafe_b64decode(payload))["exp"])
+    except Exception:
+        return 0.0
+
+
+def pb_auth(force=False):
+    global _pb_token, _pb_token_exp
+    if not force and _pb_token and time.time() < _pb_token_exp - 300:
+        return _pb_token
+    if not PB_WORKER_EMAIL or not PB_WORKER_PASSWORD:
+        raise RuntimeError(
+            "Falta la cuenta del worker de PocketBase "
+            "(PB_WORKER_EMAIL / PB_WORKER_PASSWORD)")
+
+    url = "%s/api/collections/%s/auth-with-password" % (PB_URL, PB_AUTH_COLLECTION)
+    r = requests.post(url, json={"identity": PB_WORKER_EMAIL,
+                                 "password": PB_WORKER_PASSWORD}, timeout=30)
+    if r.status_code != 200:
+        raise RuntimeError("Auth PocketBase fallo (HTTP %d): %s"
+                           % (r.status_code, r.text[:200]))
+    _pb_token = r.json().get("token", "")
+    if not _pb_token:
+        raise RuntimeError("PocketBase no devolvio token")
+    _pb_token_exp = _jwt_exp(_pb_token) or (time.time() + 3600)
+    log.info("  PocketBase: autenticado como %s" % PB_WORKER_EMAIL)
+    return _pb_token
+
+
+def _headers():
+    # "Bearer " es lo que ya venia usando este deployment y PocketBase lo acepta.
+    return {"Authorization": "Bearer " + pb_auth()}
+
+
+def _pb_request(method, url, retries=3, **kw):
+    """Request a PocketBase con reintentos y re-auth ante 401/403."""
     for i in range(retries):
         try:
-            r = requests.get(PB_URL + path, headers=_headers(), timeout=30)
+            r = requests.request(method, url, headers=_headers(), timeout=kw.pop("timeout", 30), **kw)
+            if r.status_code in (401, 403) and i < retries - 1:
+                log.warning("  %s %s -> %d, reautenticando..." % (method, url, r.status_code))
+                pb_auth(force=True)
+                continue
             r.raise_for_status()
             return r.json()
         except Exception as e:
-            log.warning("  GET %s intento %d/%d: %s" % (path, i+1, retries, e))
-            if i == retries-1:
+            log.warning("  %s intento %d/%d: %s" % (method, i + 1, retries, e))
+            if i == retries - 1:
                 raise
             time.sleep(2)
+
+
+def pb_get(path, retries=3):
+    return _pb_request("GET", PB_URL + path, retries=retries)
+
 
 def pb_patch_json(record_id, data, retries=3):
     url = "%s/api/collections/%s/records/%s" % (PB_URL, COLLECTION, record_id)
-    for i in range(retries):
-        try:
-            r = requests.patch(url, json=data, headers=_headers(), timeout=60)
-            r.raise_for_status()
-            return r.json()
-        except Exception as e:
-            log.warning("  PATCH intento %d/%d: %s" % (i+1, retries, e))
-            if i == retries-1:
-                raise
-            time.sleep(2)
+    return _pb_request("PATCH", url, retries=retries, json=data, timeout=60)
 
 def pb_get_record_by_slug(slug):
     """Busca record por slug. Devuelve (id, record) fresco desde PocketBase."""
@@ -546,17 +644,22 @@ def pano_is_valid(path):
 # ─────────────────────────────────────────────────────────────────────
 # HY-Pano 2.0 — single image → 360° panorama
 # ─────────────────────────────────────────────────────────────────────
-def generate_panorama(slug, orig_filename):
+def generate_panorama(slug, orig_filename, prof=None):
     """Generate equirectangular panorama from single input image.
 
     Returns path to panorama PNG, or None if generation failed.
 
     Stages:
       1. Load HunyuanPanoPipeline (cached globally)
-      2. Call pipeline with input image → panorama
+      2. Call pipeline con ESCALERA DE DEGRADACION → panorama
       3. Save to projects/<slug>/pano/<orig_name>_pano.png
 
-    If generation fails, returns None (caller falls back to original image).
+    ESCALERA (hw_profile.pano_fallback_ladder): antes esta funcion reintentaba
+    dos veces con los MISMOS parametros y, al fallar, el caller caia en silencio
+    a "solo frente" — es decir, se perdia el 360 justo en las maquinas donde mas
+    importa. Ahora se degrada primero en pasos de difusion (lineal en tiempo,
+    casi plano en VRAM) y despues en resolucion (cuadratica en VRAM), agotando
+    la escalera antes de rendirse.
     """
     global _PIPELINE_HYPOANO
 
@@ -590,6 +693,11 @@ def generate_panorama(slug, orig_filename):
         log.error("  [%s] pano: no se pudo importar HunyuanPanoPipeline: %s" % (slug, e))
         return None
 
+    # Residencia secuencial: si WorldMirror quedo cargado del proyecto anterior,
+    # descargarlo ANTES de traer HY-Pano a VRAM (ver _unload_world_pipeline).
+    if prof is not None and prof.sequential_residency:
+        _unload_world_pipeline()
+
     if _PIPELINE_HYPOANO is None:
         log.info("  [%s] pano: cargando HY-Pano 2.0 (solo primera vez)..." % slug)
         try:
@@ -602,36 +710,49 @@ def generate_panorama(slug, orig_filename):
             log.error("  [%s] pano: FALLO al cargar HY-Pano: %s" % (slug, e))
             return None
 
-    # Parametros del panorama segun perfil de hardware (resolucion/steps).
-    _ph = PROFILE.pano_height if PROFILE else 1024
-    _pw = PROFILE.pano_width  if PROFILE else 2048
-    _psteps = PROFILE.pano_steps if PROFILE else 50
-    log.info("  [%s] pano: %dx%d, %d steps (perfil=%s)" % (
-        slug, _pw, _ph, _psteps, PROFILE.tier if PROFILE else "default"))
+    # Escalera de degradacion segun perfil efectivo (hardware + preset).
+    if prof is not None and _HW_PROFILE_OK:
+        ladder = pano_fallback_ladder(prof)
+        tier = prof.tier
+    else:
+        ladder = [{"height": 1024, "width": 2048, "steps": 50}]
+        tier = "default"
 
-    # Hasta 2 intentos: un error de driver/OOM transitorio se suele resolver
-    # liberando VRAM y reintentando una vez. Si persiste, el caller cae a frente.
+    vram_probe(reset=True)
     result = None
-    for _attempt in range(1, 3):
+    used = None
+    for rung, cfg in enumerate(ladder, 1):
+        log.info("  [%s] pano: intento %d/%d — %dx%d, %d steps (perfil=%s)" % (
+            slug, rung, len(ladder), cfg["width"], cfg["height"], cfg["steps"], tier))
         try:
             result = _PIPELINE_HYPOANO(
                 image=input_file,
-                height=_ph,
-                width=_pw,
-                diff_infer_steps=_psteps,
+                height=cfg["height"],
+                width=cfg["width"],
+                diff_infer_steps=cfg["steps"],
                 blend_width=32,
                 verbose=0,  # 0 = sin dump de "Model input info"/tokens (logs limpios)
                 seed=random.randint(0, 2**31),
             )
+            used = cfg
             break
         except Exception as e:
-            if _attempt == 1 and _is_oom_error(e):
-                log.warning("  [%s] pano: error CUDA recuperable (%s) — liberando VRAM y reintentando" % (
-                    slug, ("%s" % e)[:80]))
-                free_vram()
-                continue
-            log.error("  [%s] pano: inference FALLO: %s\n%s" % (slug, e, traceback.format_exc()))
-            return None
+            if not _is_oom_error(e):
+                log.error("  [%s] pano: inference FALLO (no recuperable): %s\n%s" % (
+                    slug, e, traceback.format_exc()))
+                return None
+            log.warning("  [%s] pano: OOM/CUDA en %dx%d/%dsteps (%s)" % (
+                slug, cfg["width"], cfg["height"], cfg["steps"], ("%s" % e)[:80]))
+            free_vram()
+            if rung == len(ladder):
+                log.error("  [%s] pano: escalera agotada — no se pudo generar el 360" % slug)
+                return None
+            log.warning("  [%s] pano: bajando un escalon y reintentando" % slug)
+
+    log_vram(slug, "pano")
+    if used is not None:
+        log.info("  [%s] pano: generado a %dx%d/%dsteps" % (
+            slug, used["width"], used["height"], used["steps"]))
 
     try:
         if hasattr(result, "save"):
@@ -679,19 +800,45 @@ def generate_panorama(slug, orig_filename):
 # ─────────────────────────────────────────────────────────────────────
 # Multi-view extraction from equirectangular panorama
 # ─────────────────────────────────────────────────────────────────────
-def extract_multiview_from_panorama(slug, orig_filename, n_views=9):
-    """Extract N equiangular perspective views from an equirectangular panorama.
+def _clear_views_dir(views_dir):
+    """Vacia projects/<slug>/views antes de escribir un layout nuevo.
 
-    Uses the equirectangular projection to sample N views with overlapping
-    coverage. Each view is saved as a perspective PNG that WorldMirror can
-    process directly.
+    CRITICO: run_ml lee el DIRECTORIO completo, no la lista que devolvemos. Sin
+    esta limpieza, cambiar de 360 a solo-frente (o cambiar el numero de vistas
+    entre corridas) dejaba vistas viejas mezcladas con las nuevas: WorldMirror
+    recibia una escena incoherente —geometria corrupta— y consumia mas VRAM de
+    la presupuestada por el perfil.
+    """
+    removed = 0
+    for old in (glob.glob(os.path.join(views_dir, "*.png")) +
+                glob.glob(os.path.join(views_dir, "*.jpg"))):
+        try:
+            os.remove(old)
+            removed += 1
+        except Exception:
+            pass
+    return removed
 
-    Returns list of view image paths, or None if extraction failed.
 
-    View layout (n_views=9):
-      - Center: 1 view at azimuth=0°, elev=0°
-      - Ring 1: 4 views at 45°, 135°, 225°, 315° (elev=0°)
-      - Ring 2: 4 views at 45°, 135°, 225°, 315° (elev=±30°)
+def extract_multiview_from_panorama(slug, orig_filename, prof):
+    """Extrae vistas en perspectiva que cubren la ESFERA COMPLETA del panorama.
+
+    Devuelve la lista de rutas de vista, o None si fallo.
+
+    LAYOUT (hw_profile.Profile.view_layout) — el espacio completo, no un anillo:
+      - Anillo ecuatorial : n_horizontal vistas a elevacion 0 (paredes)
+      - Anillo superior   : n_ring vistas a +58 grados (techo)
+      - Anillo inferior   : n_ring vistas a -58 grados (suelo)
+
+    El FOV se DERIVA del numero de vistas para garantizar solape. La version
+    anterior usaba FOV fijo de 60 grados con un numero de vistas variable: con
+    5 vistas el paso era de 72 grados > 60 de FOV, o sea que el "360" salia con
+    huecos sin cubrir. Ademas solo tenia el anillo ecuatorial, asi que techo y
+    suelo nunca se reconstruian.
+
+    El muestreo es BILINEAL. El anterior era del vecino mas proximo
+    (`.astype(int)`), que aliasa los bordes — y los bordes son justo lo que
+    WorldMirror usa para estimar profundidad.
     """
     base_name = os.path.splitext(orig_filename)[0]
     pano_path = pano_path_for_slug(slug, base_name)
@@ -703,14 +850,6 @@ def extract_multiview_from_panorama(slug, orig_filename, n_views=9):
     views_dir = os.path.join(PROJECTS_DIR, slug, "views")
     os.makedirs(views_dir, exist_ok=True)
 
-    # Check cache
-    view_paths = [view_path_for_slug(slug, base_name, i) for i in range(n_views)]
-    cached = all(os.path.exists(p) and os.path.getsize(p) > 0 for p in view_paths)
-    if cached:
-        log.info("  [%s] multiview: %d views ya cacheadas" % (slug, n_views))
-        return view_paths
-
-    log.info("  [%s] multiview: extrayendo %d views desde panorama..." % (slug, n_views))
     try:
         from PIL import Image
         import numpy as np
@@ -719,110 +858,182 @@ def extract_multiview_from_panorama(slug, orig_filename, n_views=9):
         return None
 
     try:
-        pano = Image.open(pano_path)
-        pano_w, pano_h = pano.size
-        log.info("  [%s] multiview: panorama size=%dx%d" % (slug, pano_w, pano_h))
+        with Image.open(pano_path) as _p:
+            pano_arr = np.asarray(_p.convert("RGB"))
+        pano_h, pano_w = pano_arr.shape[:2]
     except Exception as e:
         log.error("  [%s] multiview: no se pudo abrir panorama: %s" % (slug, e))
         return None
 
-    VIEW_FOV = 60  # degrees, vertical FOV for each extracted view
-    VIEW_W, VIEW_H = 1024, 1024
+    layout   = prof.view_layout()
+    fov_deg  = prof.fov
+    out_side = prof.view_resolution()
+    n_views  = len(layout)
 
-    def equirectangular_to_cartesian(azimuth_deg, elev_deg):
-        """Convert azimuth/elevation (degrees) to direction unit vector."""
-        az = math.radians(azimuth_deg)
-        el = math.radians(elev_deg)
-        x = math.cos(el) * math.sin(az)
-        y = math.cos(el) * math.cos(az)
-        z = math.sin(el)
-        return np.array([x, y, z])
+    # Sin cache entre corridas: el layout depende del perfil efectivo (hardware
+    # + preset), y reutilizar vistas de otro layout es exactamente el bug que
+    # _clear_views_dir viene a cerrar. Re-extraer cuesta segundos de CPU.
+    n_old = _clear_views_dir(views_dir)
+    if n_old:
+        log.info("  [%s] multiview: %d vista(s) de una corrida anterior eliminadas" % (
+            slug, n_old))
 
-    pano_arr = np.array(pano.convert("RGB"))  # una sola conversion (no por pixel)
+    log.info("  [%s] multiview: %d vistas (%dh + 2x%d anillos) fov=%.0f° a %dpx "
+             "desde panorama %dx%d" % (slug, n_views, prof.n_horizontal,
+                                       prof.n_ring, fov_deg, out_side, pano_w, pano_h))
 
-    def sample_perspective_from_pano(pano_img, azimuth_deg, elev_deg, fov_deg, out_w, out_h):
-        """Sample a perspective view from equirectangular panorama (vectorizado).
+    def _direction(azimuth_deg, elev_deg):
+        """azimut/elevacion (grados) -> vector unitario de direccion."""
+        az, el = math.radians(azimuth_deg), math.radians(elev_deg)
+        return np.array([math.cos(el) * math.sin(az),
+                         math.cos(el) * math.cos(az),
+                         math.sin(el)])
 
-        Returns PIL Image of the perspective projection."""
-        # Camera basis
-        cam_dir = equirectangular_to_cartesian(azimuth_deg, elev_deg)
-        world_up = np.array([0, 0, 1])
+    def _sample(azimuth_deg, elev_deg):
+        """Vista en perspectiva desde el equirectangular (vectorizada, bilineal)."""
+        cam_dir = _direction(azimuth_deg, elev_deg)
+        # En los anillos polares cam_dir se acerca a world_up y el producto
+        # vectorial degenera; se usa otra referencia para la base de camara.
+        world_up = np.array([0.0, 0.0, 1.0])
+        if abs(float(np.dot(cam_dir, world_up))) > 0.999:
+            world_up = np.array([0.0, 1.0, 0.0])
         cam_right = np.cross(world_up, cam_dir)
-        cam_right = cam_right / (np.linalg.norm(cam_right) + 1e-8)
+        cam_right /= (np.linalg.norm(cam_right) + 1e-8)
         cam_up = np.cross(cam_dir, cam_right)
 
-        # FOV -> focal
-        fov_rad = math.radians(fov_deg)
-        focal_px = (out_w / 2) / math.tan(fov_rad / 2)
-        cx, cy = out_w // 2, out_h // 2
+        focal_px = (out_side / 2.0) / math.tan(math.radians(fov_deg) / 2.0)
+        c = out_side / 2.0
 
-        # Rays para todos los pixeles a la vez
-        xs, ys = np.meshgrid(np.arange(out_w), np.arange(out_h))
-        dx = (xs - cx) / focal_px
-        dy = (ys - cy) / focal_px
+        xs, ys = np.meshgrid(np.arange(out_side), np.arange(out_side))
+        dx = (xs - c) / focal_px
+        dy = (ys - c) / focal_px
         ray = np.stack([dx, -dy, np.ones_like(dx, dtype=np.float64)], axis=-1)
         ray /= (np.linalg.norm(ray, axis=-1, keepdims=True) + 1e-8)
 
-        ray_world = (ray[..., 0:1] * cam_right +
-                     ray[..., 1:2] * cam_up +
-                     ray[..., 2:3] * cam_dir)
-        ray_world /= (np.linalg.norm(ray_world, axis=-1, keepdims=True) + 1e-8)
+        rw = (ray[..., 0:1] * cam_right +
+              ray[..., 1:2] * cam_up +
+              ray[..., 2:3] * cam_dir)
+        rw /= (np.linalg.norm(rw, axis=-1, keepdims=True) + 1e-8)
 
-        # Direccion -> UV equirectangular
-        az = np.arctan2(ray_world[..., 0], ray_world[..., 1])   # [-pi, pi]
-        el = np.arcsin(np.clip(ray_world[..., 2], -1, 1))
-        u = (az / (2 * math.pi) + 0.5) % 1.0
-        v = (el / math.pi + 0.5)
-        px_pano = (u * pano_w).astype(np.int64) % pano_w
-        py_pano = np.clip((v * pano_h).astype(np.int64), 0, pano_h - 1)
+        az = np.arctan2(rw[..., 0], rw[..., 1])            # [-pi, pi]
+        el = np.arcsin(np.clip(rw[..., 2], -1.0, 1.0))
+        u = ((az / (2 * math.pi) + 0.5) % 1.0) * pano_w
+        v = (el / math.pi + 0.5) * pano_h
 
-        out = pano_arr[py_pano, px_pano]
-        return Image.fromarray(out.astype(np.uint8))
+        # Bilineal: azimut envuelve (modulo), elevacion se recorta en los polos.
+        x0 = np.floor(u).astype(np.int64)
+        y0 = np.floor(v).astype(np.int64)
+        fx = (u - x0)[..., None]
+        fy = (v - y0)[..., None]
+        x0m, x1m = x0 % pano_w, (x0 + 1) % pano_w
+        y0m = np.clip(y0, 0, pano_h - 1)
+        y1m = np.clip(y0 + 1, 0, pano_h - 1)
 
-    # View angles: cobertura horizontal uniforme, sin duplicados.
-    # n_views=9 -> azimuts cada 40 grados (0, 40, ..., 320), elev 0.
-    step = 360.0 / n_views
-    view_angles = [(round(i * step), 0) for i in range(n_views)]
+        p00 = pano_arr[y0m, x0m].astype(np.float32)
+        p10 = pano_arr[y0m, x1m].astype(np.float32)
+        p01 = pano_arr[y1m, x0m].astype(np.float32)
+        p11 = pano_arr[y1m, x1m].astype(np.float32)
+        top = p00 * (1 - fx) + p10 * fx
+        bot = p01 * (1 - fx) + p11 * fx
+        return Image.fromarray(
+            np.clip(top * (1 - fy) + bot * fy, 0, 255).astype(np.uint8))
 
-    for i, (az, el) in enumerate(view_angles):
+    view_paths = []
+    for i, (az, el) in enumerate(layout):
         view_path = view_path_for_slug(slug, base_name, i)
         try:
-            view_img = sample_perspective_from_pano(pano, az, el, VIEW_FOV, VIEW_W, VIEW_H)
-            view_img.save(view_path, "PNG")
-            log.debug("  [%s] multiview: view %d (az=%d°, el=%d°) -> %s" % (
-                slug, i, az, el, view_path))
+            _sample(az, el).save(view_path, "PNG")
+            view_paths.append(view_path)
+            log.debug("  [%s] multiview: vista %02d (az=%.0f° el=%.0f°) -> %s" % (
+                slug, i, az, el, os.path.basename(view_path)))
         except Exception as e:
-            log.error("  [%s] multiview: view %d FALLO: %s" % (slug, i, e))
+            log.error("  [%s] multiview: vista %d FALLO: %s" % (slug, i, e))
             return None
 
-    log.info("  [%s] multiview: %d views extraidas" % (slug, len(view_angles)))
+    log.info("  [%s] multiview: %d vistas extraidas (esfera completa)" % (
+        slug, len(view_paths)))
     return view_paths
 
 
 # ─────────────────────────────────────────────────────────────────────
 # WorldMirror 2.0 — multi-view → 3D reconstruction
 # ─────────────────────────────────────────────────────────────────────
-def run_ml(slug, settings=None, want_mesh=True):
+def _stage_views(slug, view_paths):
+    """Copia las vistas elegidas a projects/<slug>/views_active y devuelve el dir.
+
+    WorldMirrorPipeline.__call__ recibe un DIRECTORIO (hace glob+sorted dentro,
+    ver inference_utils.prepare_input), no una lista: no hay forma de pasarle un
+    subconjunto sin materializarlo. Este staging da dos garantias:
+      - la escena contiene EXACTAMENTE las vistas de esta corrida (ningun PNG
+        residual de una corrida anterior se cuela por el glob),
+      - el orden lexicografico (view_000, view_001, ...) coincide con el orden
+        del layout, que es el que luego empareja los depth maps en el GLB.
+    """
+    stage = os.path.join(PROJECTS_DIR, slug, "views_active")
+    os.makedirs(stage, exist_ok=True)
+    _clear_views_dir(stage)
+    staged = []
+    for i, src in enumerate(view_paths):
+        dst = os.path.join(stage, "view_%03d.png" % i)
+        shutil.copyfile(src, dst)
+        staged.append(dst)
+    return stage, staged
+
+
+def _thin_views(view_paths, keep):
+    """Reduce la lista de vistas a `keep` repartiendolas de forma UNIFORME.
+
+    Se usa en la recuperacion de OOM. Coger las N primeras arruinaria la
+    cobertura (dejaria fuera los anillos de techo/suelo, que van al final del
+    layout); un muestreo con paso constante conserva la esfera completa, solo
+    que mas espaciada.
+    """
+    n = len(view_paths)
+    if keep >= n or keep <= 0:
+        return list(view_paths)
+    idx = [int(round(i * (n - 1) / float(keep - 1))) for i in range(keep)] \
+        if keep > 1 else [0]
+    seen, out = set(), []
+    for i in idx:
+        if i not in seen:
+            seen.add(i)
+            out.append(view_paths[i])
+    return out
+
+
+def run_ml(slug, settings=None, want_mesh=True, prof=None, view_paths=None):
     """Ejecuta WorldMirrorPipeline con las views extraidas.
     El output se guarda en projects/<slug>/output/."""
     views_dir = os.path.join(PROJECTS_DIR, slug, "views")
     output_dir = os.path.join(PROJECTS_DIR, slug, "output")
     os.makedirs(output_dir, exist_ok=True)
 
-    views = sorted(glob.glob(os.path.join(views_dir, "*.png"))) + \
-            sorted(glob.glob(os.path.join(views_dir, "*.jpg")))
+    # Lista EXPLICITA de vistas. Antes se hacia glob del directorio, asi que
+    # cualquier PNG residual de una corrida anterior entraba en la escena.
+    if view_paths:
+        views = [p for p in view_paths if os.path.exists(p) and os.path.getsize(p) > 0]
+    else:
+        views = sorted(glob.glob(os.path.join(views_dir, "*.png"))) + \
+                sorted(glob.glob(os.path.join(views_dir, "*.jpg")))
     if not views:
         log.error("  [%s] run_ml: sin views en %s" % (slug, views_dir))
         return None
 
     global _PIPELINE_WORLD, PROFILE
-    if _PIPELINE_WORLD is None:
-        log.info("  [%s] run_ml: cargando WorldMirrorPipeline (solo la primera vez)..." % slug)
-        free_vram()  # asegura VRAM libre antes de cargar (residencia secuencial)
-        from hyworld2.worldrecon.pipeline import WorldMirrorPipeline
-        _PIPELINE_WORLD = WorldMirrorPipeline.from_pretrained(
-            "tencent/HY-World-2.0", enable_bf16=True)
-        log.info("  [%s] run_ml: WorldMirrorPipeline cacheado OK" % slug)
+    if prof is None:
+        prof = PROFILE
+
+    def _ensure_world_pipeline():
+        global _PIPELINE_WORLD
+        if _PIPELINE_WORLD is None:
+            log.info("  [%s] run_ml: cargando WorldMirrorPipeline..." % slug)
+            free_vram()  # asegura VRAM libre antes de cargar (residencia secuencial)
+            from hyworld2.worldrecon.pipeline import WorldMirrorPipeline
+            _PIPELINE_WORLD = WorldMirrorPipeline.from_pretrained(
+                "tencent/HY-World-2.0", enable_bf16=True)
+            log.info("  [%s] run_ml: WorldMirrorPipeline cacheado OK" % slug)
+
+    _ensure_world_pipeline()
 
     ALLOWED = {
         "target_size", "max_resolution",
@@ -857,33 +1068,54 @@ def run_ml(slug, settings=None, want_mesh=True):
         kw.setdefault("apply_edge_mask", True)
         return kw
 
-    # ── Inferencia con recuperacion de OOM: si revienta por memoria, bajamos
-    #    un escalon de perfil y reintentamos el MISMO proyecto (sin tumbar la
-    #    cola). Solo se degrada ante OOM; otros errores se propagan. ─────────
-    attempt_prof = PROFILE
+    # ── Inferencia con recuperacion de OOM ────────────────────────────────
+    # Si revienta por memoria bajamos un escalon de perfil y reintentamos el
+    # MISMO proyecto (sin tumbar la cola). Solo se degrada ante OOM.
+    #
+    # Dos arreglos sobre la version anterior:
+    #  a) tambien se reduce el NUMERO DE VISTAS. La atencion cross-view de
+    #     WorldMirror crece con N, asi que es la segunda palanca mas fuerte
+    #     despues de la resolucion, y antes quedaba sin usar porque las vistas
+    #     ya estaban en disco. Se adelgaza con _thin_views para no perder la
+    #     cobertura esferica.
+    #  b) se DESCARGA Y RECARGA el pipeline entre intentos. Tras un OOM el
+    #     allocator de CUDA queda fragmentado y con estado sucio; reintentar
+    #     sobre la misma instancia suele volver a fallar aunque el nuevo perfil
+    #     si quepa.
+    attempt_prof = prof
+    attempt_views = list(views)
     max_attempts = 4
     result = None
+    stage_dir = None
     for attempt in range(1, max_attempts + 1):
         kwargs = _build_kwargs(attempt_prof)
         tier = attempt_prof.tier if attempt_prof else "default"
-        log.info("  [%s] run_ml: intento %d/%d (perfil=%s) %d views. Ajustes=%s" % (
-            slug, attempt, max_attempts, tier, len(views),
+        log.info("  [%s] run_ml: intento %d/%d (perfil=%s) %d vistas. Ajustes=%s" % (
+            slug, attempt, max_attempts, tier, len(attempt_views),
             {k: v for k, v in kwargs.items() if k != "strict_output_path"}))
+        vram_probe(reset=True)
         try:
-            result = _PIPELINE_WORLD(views_dir, **kwargs)
+            _ensure_world_pipeline()
+            stage_dir, _staged = _stage_views(slug, attempt_views)
+            result = _PIPELINE_WORLD(stage_dir, **kwargs)
             if not result:
                 log.error("  [%s] run_ml: pipeline devolvio None" % slug)
                 return None
+            log_vram(slug, "worldmirror")
             log.info("  [%s] run_ml: pipeline completado -> %s" % (slug, result))
             break
         except Exception as e:
             is_oom = _is_oom_error(e)
             nxt = downgrade_profile(attempt_prof) if (is_oom and attempt_prof and _HW_PROFILE_OK) else None
             if is_oom and nxt is not None:
-                log.warning("  [%s] run_ml: OOM en perfil '%s' — bajando a '%s' y reintentando" % (
-                    slug, tier, nxt.tier))
-                free_vram()
+                # Adelgazar vistas al tope del nuevo perfil, conservando la esfera.
+                new_views = _thin_views(attempt_views, min(nxt.n_views, len(attempt_views) - 1))
+                log.warning("  [%s] run_ml: OOM en perfil '%s' — bajando a '%s' "
+                            "(%d -> %d vistas) y recargando pipeline" % (
+                                slug, tier, nxt.tier, len(attempt_views), len(new_views)))
+                _unload_world_pipeline()   # allocator limpio para el reintento
                 attempt_prof = nxt
+                attempt_views = new_views
                 continue
             log.error("  [%s] run_ml: FALLO%s: %s\n%s" % (
                 slug, " (OOM, sin mas downgrade)" if is_oom else "",
@@ -896,26 +1128,35 @@ def run_ml(slug, settings=None, want_mesh=True):
     if want_mesh:
         try:
             glb_step = eff_prof.glb_step if eff_prof else 2
-            export_glb_from_ply(slug, glb_step=glb_step)
+            # views_dir = el staging REAL de la corrida: es el unico conjunto
+            # cuyo orden y cardinalidad coinciden con los depth maps generados.
+            export_glb_from_ply(slug, glb_step=glb_step, views_dir=stage_dir)
         except Exception as e:
             log.error("  [%s] mesh GLB FALLO: %s\n%s" % (slug, e, traceback.format_exc()))
+        log_vram(slug, "glb")
 
     free_vram()  # deja VRAM limpia para el siguiente proyecto de la cola
     return output_dir
 
 
-def export_glb_from_ply(slug, glb_step=2):
+def export_glb_from_ply(slug, glb_step=2, views_dir=None):
     """Genera mesh.glb desde depth map + imagen de vista (malla 3D real con colores).
     Proyecta cada pixel del depth map al espacio 3D usando los intrinsecos de camara,
     conecta pixeles adyacentes con triangulos filtrando discontinuidades de profundidad.
     Sin CUDA, sin re-inferencia. Fallback: nube de puntos si faltan depth maps.
+
+    `views_dir` debe ser el directorio EXACTO que se paso al pipeline: el zip de
+    depth maps con vistas asume misma cardinalidad y mismo orden lexicografico.
     """
     import numpy as np
     import trimesh
     import json
 
     output_dir = os.path.join(PROJECTS_DIR, slug, "output")
-    views_dir  = os.path.join(PROJECTS_DIR, slug, "views")
+    if views_dir is None:
+        views_dir = os.path.join(PROJECTS_DIR, slug, "views_active")
+        if not os.path.isdir(views_dir):
+            views_dir = os.path.join(PROJECTS_DIR, slug, "views")
     glb_path   = os.path.join(output_dir, "mesh.glb")
 
     # --- Buscar depth maps y vistas ---
@@ -935,8 +1176,16 @@ def export_glb_from_ply(slug, glb_step=2):
         log.warning("  [%s] glb: camera_params.json no leible (%s) — fallback" % (slug, e))
         return _export_glb_pointcloud(slug, glb_path)
 
-    log.info("  [%s] glb: reconstruyendo malla desde %d depth map(s)..." % (
-        slug, len(depth_files)))
+    # zip() trunca en silencio: si las cardinalidades no cuadran, parte de la
+    # esfera se perderia sin ni un aviso en el log. Mejor decirlo.
+    if len(depth_files) != len(view_files):
+        log.warning("  [%s] glb: %d depth maps vs %d vistas en %s — se usaran %d "
+                    "(revisar staging de vistas)" % (
+                        slug, len(depth_files), len(view_files), views_dir,
+                        min(len(depth_files), len(view_files))))
+
+    log.info("  [%s] glb: reconstruyendo malla desde %d depth map(s) (step=%d)..." % (
+        slug, min(len(depth_files), len(view_files)), glb_step))
 
     try:
         from PIL import Image
@@ -1235,6 +1484,10 @@ ASSET_SERVER_MAX_WAIT = 600   # segundos (10 min) antes de timeout
 ASSET_SERVER_POLL_SEC = 8     # intervalo de poll
 
 
+ASSET_CONTAINER     = os.environ.get("ASSET_CONTAINER", "hyworld_assets")
+ASSET_BOOT_MAX_WAIT = 900   # segundos: cargar los modelos 3D tarda varios min
+
+
 def _asset_server_ready():
     """Retorna True si el asset server responde en /status/ping (o cualquier endpoint)."""
     try:
@@ -1242,6 +1495,45 @@ def _asset_server_ready():
         return True   # 404 también cuenta — el server está up
     except Exception:
         return False
+
+
+def _start_asset_container():
+    """Enciende el contenedor del asset server (creado pero apagado).
+
+    El contenedor NO arranca con el resto: se prende recien cuando llega un
+    pedido desde el frontend, para no gastar VRAM ni los minutos de carga de
+    modelos si en esta sesion no se generan assets.
+    """
+    try:
+        import docker as _docker
+        client = _docker.from_env()
+        cont = client.containers.get(ASSET_CONTAINER)
+        if cont.status == "running":
+            return True
+        log.info("  asset: encendiendo %s on-demand..." % ASSET_CONTAINER)
+        cont.start()
+        return True
+    except Exception as e:
+        log.warning("  asset: no se pudo encender %s: %s" % (ASSET_CONTAINER, e))
+        return False
+
+
+def _ensure_asset_server():
+    """Deja el asset server listo, encendiendolo si hace falta."""
+    if _asset_server_ready():
+        return True
+    if not _start_asset_container():
+        return False
+    log.info("  asset: esperando a que cargue (hasta %ds)..." % ASSET_BOOT_MAX_WAIT)
+    waited = 0
+    while waited < ASSET_BOOT_MAX_WAIT:
+        time.sleep(5)
+        waited += 5
+        if _asset_server_ready():
+            log.info("  asset: listo tras %ds" % waited)
+            return True
+    log.error("  asset: timeout esperando a que arranque el asset server")
+    return False
 
 
 def process_asset(rec):
@@ -1269,8 +1561,8 @@ def process_asset(rec):
     else:
         log.info("  [%s] asset: input cacheado: %s" % (slug, input_file))
 
-    # ── Verificar asset server disponible ────────────────────────────
-    if not _asset_server_ready():
+    # ── Asset server: se enciende recien ahora, on-demand ────────────
+    if not _ensure_asset_server():
         log.warning("  [%s] asset: Asset Server no disponible en %s — SKIP" % (slug, ASSET_SERVER))
         return
 
@@ -1500,28 +1792,46 @@ def process(rec):
     set_status(rid, "processing")
 
     # ── Modo de generacion: full_360 (default False) ─────────────────
-    # full_360 = True  -> HY-Pano 360 + multiview (9 vistas) + GLB completo
+    # full_360 = True  -> HY-Pano 360 + multiview esfera completa + GLB completo
     # full_360 = False -> solo imagen de frente (GLB rapido del frente)
     settings = rec.get("settings") or {}
     full_360 = bool(settings.get("full_360", False))
-    log.info("  [%s] modo generacion: %s" % (slug, "360 COMPLETO" if full_360 else "SOLO FRENTE"))
+
+    # Perfil EFECTIVO = hardware detectado + preset de calidad del usuario.
+    # El hardware manda: apply_preset solo baja, nunca sube por encima del tier.
+    eff = effective_profile(PROFILE, settings) if (PROFILE and _HW_PROFILE_OK) else PROFILE
+    quality = str((settings or {}).get("quality", "max")).lower()
+    log.info("  [%s] modo generacion: %s | preset=%s" % (
+        slug, "360 ESPACIO COMPLETO" if full_360 else "SOLO FRENTE", quality))
+    if eff is not None:
+        log.info("  [%s] perfil efectivo: %s" % (slug, eff.summary()))
+        # Se publica el hardware BASE con los tres presets resueltos, no solo el
+        # elegido: asi la UI puede mostrar que dan "Minima/Media/Maxima" en esta
+        # GPU concreta sin tener que ejecutarlos.
+        set_json_fields(rid, hw=publish_caps(PROFILE))
 
     view_paths = None
     if full_360:
         # ── Step 1: HY-Pano 2.0 → panorama ────────────────────────────
-        pano_path = generate_panorama(slug, orig_filename)
+        set_json_fields(rid, stage="pano")
+        pano_path = generate_panorama(slug, orig_filename, prof=eff)
         if pano_path and pano_is_valid(pano_path):
             # ── Step 1b: subir pano a PB YA (habilita visor 360 en el front
             #    mientras WorldMirror genera el modelo 3D) ──────────────
             sync_pano_to_pb(slug, rid, pano_path, force=force)
-            # ── Step 2: extract multiview from panorama ──────────────
-            _nviews = PROFILE.n_views if PROFILE else 9
-            view_paths = extract_multiview_from_panorama(slug, orig_filename, n_views=_nviews)
+            # ── Step 2: extraer la esfera completa del panorama ───────
+            set_json_fields(rid, stage="multiview")
+            view_paths = extract_multiview_from_panorama(slug, orig_filename, eff)
             if not view_paths:
                 log.warning("  [%s] multiview falló — usando solo frente" % slug)
         else:
-            log.warning("  [%s] HY-Pano no generó panorama — usando solo frente" % slug)
-            set_json_fields(rid, pano_status="error")
+            # La escalera de generate_panorama ya se agoto: si llegamos aqui,
+            # ningun escalon de resolucion/pasos produjo un 360 valido.
+            log.warning("  [%s] HY-Pano no generó panorama en ningun escalon "
+                        "— degradando a solo frente" % slug)
+            set_json_fields(rid, pano_status="error",
+                            degraded="360 no disponible en este hardware — "
+                                     "se genero solo la vista frontal")
 
     # ── Front-only: preparar imagen de frente como vista unica ────────
     # Se usa cuando full_360=False, o como fallback si el 360 falló.
@@ -1531,16 +1841,20 @@ def process(rec):
             log.error("  [%s] no se pudo preparar entrada para WorldMirror" % slug)
             set_status(rid, "error")
             return
+    elif full_360:
+        set_json_fields(rid, degraded=None)
 
     # ── Residencia secuencial: en GPUs chicas, descargar HY-Pano de VRAM
     #    antes de cargar WorldMirror (evita tener ambos modelos residentes). ─
-    if PROFILE and PROFILE.sequential_residency:
+    if eff and eff.sequential_residency:
         _unload_pano_pipeline()
 
-    # ── Step 3: WorldMirror 2.0 (siempre lee de projects/<slug>/views) ─
+    # ── Step 3: WorldMirror 2.0 sobre las vistas de ESTA corrida ──────
+    set_json_fields(rid, stage="recon")
     output_dir = None
     try:
-        output_dir = run_ml(slug, settings, want_mesh=True)
+        output_dir = run_ml(slug, settings, want_mesh=True, prof=eff,
+                            view_paths=view_paths)
     except Exception as e:
         log.error("  [%s] ML FALLO: %s\n%s" % (slug, e, traceback.format_exc()))
         set_status(rid, "error")
@@ -1584,6 +1898,7 @@ def process(rec):
                     parsed = {}
             parsed["status"] = "completed"
             parsed["regenerate"] = False
+            parsed["stage"] = None
             parsed["finished_at"] = datetime.now().isoformat()
             pb_patch_json(rid, {"json": parsed})
             log.info("  [%s] marcado completed" % slug)

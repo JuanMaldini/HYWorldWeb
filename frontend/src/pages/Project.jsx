@@ -24,7 +24,8 @@ export default function Project({ user }) {
         const found = all.find(p => p.slug === slug)
         if (found) {
           const detail = await api.getProject(found.id)
-          setProject({ ...found, files: detail.files })
+          setProject({ ...found, files: detail.files, hw: detail.hw,
+                       stage: detail.stage, degraded: detail.degraded })
           setSettings(detail.settings || found.settings || {})
         }
       } catch (err) {
@@ -40,7 +41,12 @@ export default function Project({ user }) {
         const found = all.find(p => p.slug === slug)
         if (found) {
           const d = await api.getProject(found.id)
-          setProject(prev => prev ? { ...prev, status: found.status, listo: found.listo, files: d.files } : prev)
+          setProject(prev => prev ? {
+            ...prev, status: found.status, listo: found.listo, files: d.files,
+            // El worker publica estos tres durante la corrida: perfil de
+            // hardware, etapa en curso y aviso de degradacion.
+            hw: d.hw ?? prev.hw, stage: d.stage, degraded: d.degraded,
+          } : prev)
         }
       } catch (err) { /* silencioso */ }
     }, 4000)
@@ -61,10 +67,16 @@ export default function Project({ user }) {
     }
   }
 
-  const applyPreset = async (name) => {
-    const newSettings = { ...settings, ...PRESETS[name] }
-    setSettings(newSettings)
-    try { await api.updateProjectSettings(project.id, newSettings) } catch (e) { console.error(e) }
+  // Un solo escritor de settings: evita que dos handlers pisen el estado.
+  const patchSettings = async (patch) => {
+    // Se limpian las claves absolutas heredadas (target_size/max_resolution/
+    // max_points). Ahora la calidad viaja como `quality` y es el worker quien
+    // la resuelve contra el hardware real; dejar las viejas fijaria una
+    // resolucion antigua por debajo del preset elegido.
+    const { target_size, max_resolution, max_points, ...rest } = settings
+    const next = { ...rest, ...patch }
+    setSettings(next)
+    try { await api.updateProjectSettings(project.id, next) } catch (e) { console.error(e) }
   }
 
   const handleGenerate = async () => {
@@ -181,7 +193,8 @@ export default function Project({ user }) {
         </div>
 
         {/* GenStatus */}
-        <GenStatus status={project.status} hasPano={panos.length > 0} />
+        <GenStatus status={project.status} hasPano={panos.length > 0}
+          stage={project.stage} degraded={project.degraded} />
 
         {/* 2-column layout */}
         <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0,340px) 1fr', gap: 24, alignItems: 'start' }}>
@@ -225,55 +238,23 @@ export default function Project({ user }) {
                 </div>
               </>
             ) : (
-              /* ── Space settings: presets + 360 toggle ── */
+              /* ── Space settings: modo de generacion + presets de calidad ── */
               <>
-                <div style={{ display: 'flex', gap: 8, marginBottom: 14 }}>
-                  {Object.keys(PRESETS).map(name => {
-                    const active = Object.entries(PRESETS[name]).every(([k, v]) => sval(k) === v)
-                    return (
-                      <button key={name} onClick={() => applyPreset(name)} disabled={!user}
-                        style={{
-                          flex: 1, padding: '7px 0', fontSize: 12, fontWeight: 600,
-                          background: active ? 'var(--accent)' : 'var(--bg-dark)',
-                          color: active ? '#fff' : 'var(--text-dim)',
-                          border: `1px solid ${active ? 'var(--accent)' : 'var(--border)'}`,
-                          borderRadius: 7, transition: 'all 0.2s',
-                          cursor: user ? 'pointer' : 'default',
-                          ...(!user && { opacity: 0.5, pointerEvents: 'none' }),
-                        }}>
-                        {name}
-                      </button>
-                    )
-                  })}
-                </div>
-                <div
-                  onClick={user ? async () => {
-                    const new360 = !sval('full_360')
-                    const newSettings = { ...settings, full_360: new360 }
-                    setSettings(newSettings)
-                    try { await api.updateProjectSettings(project.id, newSettings) } catch (e) { console.error(e) }
-                  } : undefined}
-                  style={{
-                    display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12,
-                    background: 'var(--bg-dark)', border: `1px solid ${sval('full_360') ? 'var(--accent)' : 'var(--border)'}`,
-                    borderRadius: 8, padding: '12px 14px', userSelect: 'none',
-                    cursor: user ? 'pointer' : 'default',
-                    ...(!user && { opacity: 0.5, pointerEvents: 'none' }),
-                  }}>
-                  <span>
-                    <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text)' }}>Generacion 360 completa</div>
-                    <div style={{ fontSize: 12, color: 'var(--text-dim)', marginTop: 2 }}>
-                      {sval('full_360')
-                        ? 'ON — panorama 360 + multiview + GLB completo'
-                        : 'OFF — solo imagen de frente'}
-                    </div>
-                  </span>
-                  <input type="checkbox" checked={!!sval('full_360')} readOnly
-                    style={{ width: 20, height: 20, accentColor: 'var(--accent)', flexShrink: 0 }} />
-                </div>
-                <div style={{ marginTop: 12, fontSize: 11, color: 'var(--text-faint)' }}>
-                  Calidad máxima · Resolución máxima
-                </div>
+                <ModeSwitch
+                  value={!!sval('full_360')}
+                  disabled={!user}
+                  onChange={(on) => patchSettings({ full_360: on })}
+                />
+
+                <QualityPresets
+                  value={String(sval('quality'))}
+                  disabled={!user}
+                  hw={project.hw}
+                  full360={!!sval('full_360')}
+                  onChange={(q) => patchSettings({ quality: q })}
+                />
+
+                <HardwareNote hw={project.hw} />
               </>
             )}
           </div>
@@ -413,30 +394,167 @@ export default function Project({ user }) {
   )
 }
 
-// Presets de calidad — solo target_size/max_resolution/max_points.
-// full_360 es independiente: se controla con su propio toggle.
-const PRESETS = {
-  MIN: { target_size: 512,  max_resolution: 1024, max_points: 1000000 },
-  MED: { target_size: 768,  max_resolution: 1920, max_points: 2500000 },
-  MAX: { target_size: 1120, max_resolution: 2560, max_points: 4000000 },
-}
+// Presets de calidad. Ya NO llevan valores absolutos: la calidad viaja como
+// `quality` y el worker la resuelve contra el hardware real (hw_profile.
+// apply_preset). Aqui solo vive lo que se muestra en pantalla.
+const PRESETS = [
+  { id: 'min', label: 'Mínima',  hint: 'Vista previa rápida' },
+  { id: 'med', label: 'Media',   hint: 'Equilibrio detalle/tiempo' },
+  { id: 'max', label: 'Máxima',  hint: 'Todo el detalle que dé la GPU' },
+]
 
-// Defaults — siempre máxima calidad y resolución
 const DEF = {
   full_360: false,
-  target_size: 1120,
-  max_resolution: 2560,
-  max_points: 4000000,
+  quality: 'max',
   apply_sky_mask: true,
   apply_edge_mask: true,
   apply_confidence_mask: false,
-  save_gs: true,
   save_points: true,
   // asset settings
   texture: false,
 }
 
-function GenStatus({ status, hasPano }) {
+/* ── Modo de generación ────────────────────────────────────────────────
+   Dos tarjetas grandes en vez de un checkbox: es la decisión que más cambia
+   el resultado (y el tiempo) de toda la pantalla, así que se ve como tal. */
+function ModeSwitch({ value, disabled, onChange }) {
+  const opts = [
+    {
+      on: true, icon: '🌐', title: 'Espacio 360 completo',
+      desc: 'Panorama equirectangular + vistas de paredes, techo y suelo → geometría 3D de la esfera entera.',
+    },
+    {
+      on: false, icon: '🖼', title: 'Solo frente',
+      desc: 'Reconstruye únicamente lo que se ve en la imagen subida. Mucho más rápido.',
+    },
+  ]
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 18 }}>
+      <div style={{ fontSize: 11, color: 'var(--text-dim)', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+        Modo de generación
+      </div>
+      {opts.map(o => {
+        const active = value === o.on
+        return (
+          <div key={String(o.on)} role="radio" aria-checked={active} tabIndex={disabled ? -1 : 0}
+            onClick={disabled ? undefined : () => onChange(o.on)}
+            onKeyDown={disabled ? undefined : e => {
+              if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onChange(o.on) }
+            }}
+            style={{
+              display: 'flex', gap: 12, alignItems: 'flex-start',
+              background: active ? 'color-mix(in srgb, var(--accent) 12%, var(--bg-dark))' : 'var(--bg-dark)',
+              border: `1.5px solid ${active ? 'var(--accent)' : 'var(--border)'}`,
+              boxShadow: active ? '0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent)' : 'none',
+              borderRadius: 10, padding: '13px 14px', userSelect: 'none',
+              cursor: disabled ? 'default' : 'pointer', transition: 'all 0.18s',
+              ...(disabled && { opacity: 0.5, pointerEvents: 'none' }),
+            }}>
+            <span style={{ fontSize: 19, lineHeight: 1.1, flexShrink: 0 }}>{o.icon}</span>
+            <span style={{ minWidth: 0, flex: 1 }}>
+              <div style={{ fontSize: 13, fontWeight: 700, color: active ? 'var(--accent)' : 'var(--text)' }}>
+                {o.title}
+              </div>
+              <div style={{ fontSize: 11.5, color: 'var(--text-dim)', marginTop: 3, lineHeight: 1.45 }}>
+                {o.desc}
+              </div>
+            </span>
+            {/* Radio dibujado a mano: hereda el color de acento del tema */}
+            <span style={{
+              width: 16, height: 16, borderRadius: '50%', flexShrink: 0, marginTop: 2,
+              border: `2px solid ${active ? 'var(--accent)' : 'var(--border)'}`,
+              display: 'grid', placeItems: 'center', transition: 'all 0.18s',
+            }}>
+              {active && <span style={{ width: 7, height: 7, borderRadius: '50%', background: 'var(--accent)' }} />}
+            </span>
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
+/* ── Presets de calidad ────────────────────────────────────────────────
+   Muestran el valor EFECTIVO en el hardware detectado (project.hw, que
+   publica el worker). "Máxima" no significa lo mismo en una 3080 de 10 GB
+   que en una 4090, y la UI lo dice en vez de fingir. */
+function QualityPresets({ value, disabled, hw, full360, onChange }) {
+  const caps = hw?.presets?.[value] || null
+  return (
+    <div style={{ marginBottom: 14 }}>
+      <div style={{ fontSize: 11, color: 'var(--text-dim)', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: 8 }}>
+        Calidad
+      </div>
+      <div style={{ display: 'flex', gap: 6 }}>
+        {PRESETS.map(p => {
+          const active = value === p.id
+          return (
+            <button key={p.id} onClick={() => onChange(p.id)} disabled={disabled}
+              title={p.hint}
+              style={{
+                flex: 1, padding: '9px 0', fontSize: 12, fontWeight: 700,
+                background: active ? 'var(--accent)' : 'var(--bg-dark)',
+                color: active ? '#fff' : 'var(--text-dim)',
+                border: `1.5px solid ${active ? 'var(--accent)' : 'var(--border)'}`,
+                borderRadius: 8, transition: 'all 0.18s',
+                cursor: disabled ? 'default' : 'pointer',
+                ...(disabled && { opacity: 0.5, pointerEvents: 'none' }),
+              }}>
+              {p.label}
+            </button>
+          )
+        })}
+      </div>
+      <div style={{ fontSize: 11.5, color: 'var(--text-dim)', marginTop: 8, lineHeight: 1.5 }}>
+        {PRESETS.find(p => p.id === value)?.hint}
+        {caps && (
+          <div style={{ color: 'var(--text-faint)', marginTop: 4 }}>
+            {full360
+              ? `${caps.n_views} vistas · panorama ${caps.pano_width}×${caps.pano_height} · ${Math.round(caps.max_points / 1000)}k pts`
+              : `${caps.target_size}px · ${Math.round(caps.max_points / 1000)}k pts`}
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+/* ── Hardware detectado ────────────────────────────────────────────────
+   El worker manda: si pides más de lo que cabe, se acota. Decirlo aquí
+   evita la sorpresa de elegir "Máxima" y recibir otra cosa. */
+function HardwareNote({ hw }) {
+  if (!hw) {
+    return (
+      <div style={{ fontSize: 11, color: 'var(--text-faint)', lineHeight: 1.5 }}>
+        El hardware se detecta en la primera generación.
+      </div>
+    )
+  }
+  return (
+    <div style={{
+      fontSize: 11, color: 'var(--text-faint)', lineHeight: 1.5,
+      borderTop: '1px solid var(--border)', paddingTop: 10,
+    }}>
+      <div style={{ color: 'var(--text-dim)', fontWeight: 600 }}>
+        {hw.gpu || 'GPU'} · {hw.vram_gb ? `${hw.vram_gb} GB` : 'VRAM ?'}
+      </div>
+      <div style={{ marginTop: 2 }}>
+        Perfil <code style={{ color: 'var(--text-dim)' }}>{hw.tier}</code> — la calidad
+        se acota a lo que esta GPU admite.
+      </div>
+    </div>
+  )
+}
+
+// Etapas que publica el worker en json.stage. Sin esto, los minutos que tarda
+// el panorama se veían como un contador mudo y parecían un cuelgue.
+const STAGES = [
+  { id: 'pano',      label: 'Panorama 360' },
+  { id: 'multiview', label: 'Vistas del espacio' },
+  { id: 'recon',     label: 'Reconstrucción 3D' },
+]
+
+function GenStatus({ status, hasPano, stage, degraded }) {
   const [sec, setSec] = useState(0)
   useEffect(() => {
     if (status !== 'processing') { setSec(0); return }
@@ -445,22 +563,58 @@ function GenStatus({ status, hasPano }) {
     return () => clearInterval(id)
   }, [status])
 
-  if (!status || status === 'completed') return null
+  if (!status || status === 'completed') return degraded ? <DegradedNote text={degraded} /> : null
   const mm = String(Math.floor(sec / 60)).padStart(2, '0')
   const ss = String(sec % 60).padStart(2, '0')
+  const at = STAGES.findIndex(s => s.id === stage)
   const cfg = {
     pending:    { t: 'En espera de procesamiento', d: 'El worker lo tomará en el próximo ciclo.', dot: 'dot-wait', bar: false },
-    processing: { t: `Generando 3D — ${mm}:${ss}`, d: hasPano ? 'Reconstruyendo en GPU. El panorama 360 ya está disponible abajo.' : 'Reconstruyendo en GPU. Puede tardar varios minutos.', dot: 'dot-proc', bar: true },
+    processing: { t: `Generando 3D — ${mm}:${ss}`, d: hasPano ? 'El panorama 360 ya está disponible abajo.' : 'Reconstruyendo en GPU. Puede tardar varios minutos.', dot: 'dot-proc', bar: true },
     error:      { t: 'Error en la última generación', d: 'Se conservó el resultado anterior. Pulsa Generate para reintentar.', dot: '', bar: false },
   }[status] || { t: status, d: '', dot: '', bar: false }
 
   return (
-    <div style={{ background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 10, padding: '14px 18px', marginBottom: 20 }}>
-      <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 4 }}>
-        {cfg.dot && <span className={`dot ${cfg.dot}`} />}{cfg.t}
+    <>
+      <div style={{ background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 10, padding: '14px 18px', marginBottom: 20 }}>
+        <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 4 }}>
+          {cfg.dot && <span className={`dot ${cfg.dot}`} />}{cfg.t}
+        </div>
+        <div style={{ fontSize: 12, color: 'var(--text-dim)', marginBottom: cfg.bar ? 10 : 0 }}>{cfg.d}</div>
+        {cfg.bar && <div className="bar"><span /></div>}
+        {status === 'processing' && at >= 0 && (
+          <div style={{ display: 'flex', gap: 6, marginTop: 12, flexWrap: 'wrap' }}>
+            {STAGES.map((s, i) => (
+              <span key={s.id} style={{
+                fontSize: 11, padding: '3px 9px', borderRadius: 20,
+                border: `1px solid ${i <= at ? 'var(--accent)' : 'var(--border)'}`,
+                color: i < at ? 'var(--text-dim)' : i === at ? 'var(--accent)' : 'var(--text-faint)',
+                fontWeight: i === at ? 700 : 500,
+                background: i === at ? 'color-mix(in srgb, var(--accent) 12%, transparent)' : 'transparent',
+              }}>
+                {i < at ? '✓ ' : ''}{s.label}
+              </span>
+            ))}
+          </div>
+        )}
       </div>
-      <div style={{ fontSize: 12, color: 'var(--text-dim)', marginBottom: cfg.bar ? 10 : 0 }}>{cfg.d}</div>
-      {cfg.bar && <div className="bar"><span /></div>}
+      {degraded && <DegradedNote text={degraded} />}
+    </>
+  )
+}
+
+// Aviso de degradación: el worker agotó la escalera del 360 y entregó menos de
+// lo pedido. Antes esto pasaba en silencio y el usuario no sabía por qué su
+// "espacio completo" era una sola pared.
+function DegradedNote({ text }) {
+  return (
+    <div style={{
+      background: 'color-mix(in srgb, var(--danger, #c0392b) 10%, var(--surface))',
+      border: '1px solid color-mix(in srgb, var(--danger, #c0392b) 40%, var(--border))',
+      borderRadius: 10, padding: '12px 16px', marginBottom: 20,
+      fontSize: 12, color: 'var(--text-dim)',
+    }}>
+      <strong style={{ color: 'var(--text)' }}>⚠ Resultado degradado</strong>
+      <div style={{ marginTop: 3 }}>{text}</div>
     </div>
   )
 }

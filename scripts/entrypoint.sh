@@ -1,21 +1,26 @@
 #!/bin/bash
 # ============================================================
 # HYWorld — Entrypoint
-# Levanta worker ML en background; mantiene contenedor vivo.
+# Levanta el worker ML. Todo cuelga de /data (montado por compose
+# desde HYWORLD_DATA): no hay rutas de Windows aca.
 # ============================================================
 
 set -e
 
-WORKSPACE="/workspace"
-HYWORLD_DATA="/c/HyWorldWebData"
-PROJECTS_DIR="$HYWORLD_DATA/projects"
-LOGS_DIR="$HYWORLD_DATA/logs"
-MODELS_DIR="$HYWORLD_DATA/models"
+DATA="/data"
+PROJECTS_DIR="${PROJECTS_DIR:-$DATA/projects}"
+LOGS_DIR="${LOGS_DIR:-$DATA/logs}"
+MODELS_DIR="${MODELS_DIR:-$DATA/models}"
+HYWORLD_DIR="${HYWORLD_DIR:-$DATA/repo}"
 
-# Apuntar HuggingFace al volumen persistente (evita re-descarga en cada arranque)
+# HuggingFace -> volumen persistente (sin token: descargas anonimas).
 export HF_HOME="$MODELS_DIR"
 export HUGGINGFACE_HUB_CACHE="$MODELS_DIR/hub"
-export TRANSFORMERS_CACHE="$MODELS_DIR/hub"
+# Aun si la imagen base trae HF_TOKEN del entorno del builder, lo
+# limpiamos: el proyecto no usa autenticacion de HuggingFace.
+unset HF_TOKEN HUGGING_FACE_HUB_TOKEN
+export HYWORLD_DIR PROJECTS_DIR LOGS_DIR
+export PYTHONPATH="${PYTHONPATH:-$HYWORLD_DIR/hyworld2/panogen:$HYWORLD_DIR}"
 
 # ── Crear estructura de carpetas ───────────────────────────
 echo "[HYWorld] Init: creando estructura..."
@@ -26,24 +31,17 @@ echo "[HYWorld] Verificando GPU..."
 python3.11 -c "
 import torch
 if not torch.cuda.is_available():
-    raise RuntimeError('GPU NO DISPONIBLE — deteniendo')
+    raise RuntimeError('GPU NO DISPONIBLE - deteniendo')
 print(f'GPU: {torch.cuda.get_device_name(0)}')
 "
 
 # ── Limpiar cache HuggingFace (archivos incompletos) ────────
-# Usar HF_HOME (ya seteado arriba) como raíz del cache
 HF_CACHE_ROOT="$HF_HOME/hub"
 if [ -d "$HF_CACHE_ROOT" ]; then
-    echo "[HYWorld] Limpiando archivos incompletos del cache HF en $HF_CACHE_ROOT..."
+    echo "[HYWorld] Limpiando archivos incompletos del cache HF..."
     find "$HF_CACHE_ROOT" -name "*.incomplete" -delete 2>/dev/null || true
     find "$HF_CACHE_ROOT" -name "*.lock" -delete 2>/dev/null || true
 fi
-
-# ── Paths (Git Bash style /c/) ────────────────────────────
-export HYWORLD_DIR="/c/HyWorldWebData/repo"
-export PROJECTS_DIR="/c/HyWorldWebData/projects"
-export LOGS_DIR="/c/HyWorldWebData/logs"
-export PYTHONPATH="/c/HyWorldWebData/repo/hyworld2/panogen:/c/HyWorldWebData/repo"
 
 # ── Handover script ─────────────────────────────────────────
 WORKER_WRAPPER="/workspace/scripts/run_worker_docker.py"
@@ -52,7 +50,6 @@ if [ ! -f "$WORKER_WRAPPER" ]; then
     tail -f /dev/null
 fi
 
-# ── Directorio de trabajo ──────────────────────────────────
 cd /workspace
 
 # ── Logging ───────────────────────────────────────────────
@@ -67,12 +64,21 @@ echo " Projects : $PROJECTS_DIR"
 echo " Logs     : $LOG_FILE"
 echo " Repo     : $HYWORLD_DIR"
 echo " PB_URL   : ${PB_URL:-NO CONFIGURADO}"
+echo " Modo     : ${HYWORLD_MODE:-desconocido}"
 echo "============================================================"
 
-# ── Verificar .env ─────────────────────────────────────────
-if [ -z "$PB_URL" ] || [ -z "$PB_ADMIN_TOKEN" ]; then
-    echo "[HYWorld] ERROR: PB_URL o PB_ADMIN_TOKEN no estan definidos"
-    echo "[HYWorld] Edita el .env del repo y reinicia."
+# ── Verificar configuracion de PocketBase ──────────────────
+# Ya no hay token estatico: el worker se autentica con una cuenta de
+# servicio (email+password) y renueva su token solo. preflight.ps1
+# garantiza que estas variables lleguen en ambos modos.
+if [ -z "$PB_URL" ]; then
+    echo "[HYWorld] ERROR: PB_URL no esta definido."
+    echo "[HYWorld] Corre start.bat para regenerar la configuracion."
+    tail -f /dev/null
+fi
+if [ -z "$PB_WORKER_EMAIL" ] || [ -z "$PB_WORKER_PASSWORD" ]; then
+    echo "[HYWorld] ERROR: falta la cuenta del worker (PB_WORKER_EMAIL/PASSWORD)."
+    echo "[HYWorld] start.bat las autogenera en scripts/.env."
     tail -f /dev/null
 fi
 

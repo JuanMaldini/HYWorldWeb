@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { useNavigate, Link } from 'react-router-dom'
-import { api } from '../lib/pocketbase'
+import { api, isLocalMode } from '../lib/pocketbase'
 import '../App.css'
 
 export default function Dashboard({ user, onLogout, onLogin }) {
@@ -150,7 +150,16 @@ export default function Dashboard({ user, onLogout, onLogin }) {
         </div>
 
         <div className="dashboard-header">
-          <h1>Projects</h1>
+          <h1>
+            Projects
+            {isLocalMode && (
+              <span
+                className="local-badge"
+                title="Modo local — se procesa en esta máquina y no se sube a la web"
+                aria-label="Modo local"
+              >💻</span>
+            )}
+          </h1>
           {user && (
             <button className="btn" onClick={() => setShowModal(true)}>+ New Project</button>
           )}

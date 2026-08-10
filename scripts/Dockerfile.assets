@@ -1,0 +1,30 @@
+# ============================================================
+# HYWorld — Asset Server (Hunyuan3D-2)
+#
+# Hereda de hyworld_ml para reutilizar la capa de CUDA + PyTorch en vez
+# de bajar ~10 GB por segunda vez. preflight.ps1 construye SIEMPRE la
+# imagen del worker antes que esta.
+#
+# El codigo de Hunyuan3D-2 NO se copia aca: vive en <HYWORLD_DATA>\Hunyuan3D-2
+# (montado en /data) para que se pueda actualizar con git pull sin rebuild.
+# ============================================================
+
+FROM hyworld_ml:latest
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Dependencias de sistema para el pipeline de texturas
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    libglm-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Servidor HTTP del api_server de Hunyuan3D-2
+RUN pip install --no-cache-dir \
+    fastapi==0.115.6 "uvicorn[standard]==0.34.0" python-multipart
+
+COPY entrypoint_assets.sh /entrypoint_assets.sh
+RUN sed -i "s/\r$//" /entrypoint_assets.sh && chmod +x /entrypoint_assets.sh
+
+EXPOSE 8081
+ENTRYPOINT ["/entrypoint_assets.sh"]

@@ -48,7 +48,8 @@ RUN pip install --no-cache-dir \
     trimesh plyfile open3d==0.18.0 pycolmap==3.10.0 \
     torchmetrics loguru==0.7.3 tqdm viser tyro==1.0.8 splines \
     pymeshlab==2023.12.post2 scikit-build-core nanobind pybind11 \
-    numpy==1.26.4 psutil requests
+    numpy==1.26.4 psutil requests \
+    docker==7.1.0
 
 # cupy
 RUN pip install --no-cache-dir cupy-cuda12x==13.6.0
@@ -60,9 +61,12 @@ RUN pip install --no-cache-dir cupy-cuda12x==13.6.0
 RUN pip uninstall -y onnxruntime-gpu onnxruntime 2>/dev/null || true
 RUN pip install --no-cache-dir onnxruntime==1.20.1
 
-# gsplat - pinned al commit probado (RTX 30xx = sm_86)
-# Para otra GPU: RTX 20xx->7.5  RTX 40xx->8.9  A100->8.0
-ENV TORCH_CUDA_ARCH_LIST="8.6"
+# gsplat - pinned al commit probado.
+# La arquitectura la detecta preflight.ps1 de la GPU real y la pasa como
+# build arg (RTX 20xx->7.5  30xx->8.6  40xx->8.9  50xx->12.0  A100->8.0).
+# El default 8.6 es solo el fallback si la deteccion falla.
+ARG TORCH_CUDA_ARCH_LIST=8.6
+ENV TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST}
 RUN pip install --no-build-isolation \
     git+https://github.com/nerfstudio-project/gsplat.git@4e52698e45eaaed929ed3a5065e96a688d085df6
 

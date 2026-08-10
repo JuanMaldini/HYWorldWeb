@@ -1,9 +1,16 @@
 import PocketBase from 'pocketbase'
 
-// URLs hardcodeadas: build de produccion (Vercel) -> deploy; dev local -> localhost
-const PB_URL = import.meta.env.PROD ? 'https://pocketbase.vmoliver.cloud' : 'http://localhost:8092'
+// VITE_PB_URL manda si esta definida. Si no: en dev apunta al PocketBase
+// local que levanta start.bat (:8092); en el build de produccion, al deploy.
+const PB_URL = import.meta.env.VITE_PB_URL
+  || (import.meta.env.PROD ? 'https://pocketbase.vmoliver.cloud' : 'http://localhost:8092')
 
 export const pb = new PocketBase(PB_URL)
+
+// Modo local = el backend es un PocketBase de esta maquina. Es un estado
+// esperado, no un error: la UI lo muestra como un icono, no como aviso.
+export const isLocalMode = /^https?:\/\/(localhost|127\.0\.0\.1)/i.test(PB_URL)
+export const pbUrl = PB_URL
 
 export const login = async (email, password) => {
   const authData = await pb.collection('hyworld_user').authWithPassword(email, password)
@@ -25,12 +32,12 @@ function generateSlug(filename) {
   return `${nameWithoutExt}_${hash}`
 }
 
-export const saveToken = (token) => localStorage.setItem('pb_token', token)
-export const getToken = () => localStorage.getItem('pb_token') || ''
-
+// El token vive solo en pb.authStore (el SDK ya lo persiste en localStorage).
+// Antes se guardaba ademas una copia suelta en 'pb_token' que podia quedar
+// desincronizada del authStore al expirar o al hacer logout.
 async function pbFetch(path, opts = {}) {
   const base = PB_URL
-  const token = getToken()
+  const token = pb.authStore.token || ''
   const headers = {}
   if (token) headers['Authorization'] = `Bearer ${token}`
   if (opts.body && !(opts.body instanceof FormData)) {
@@ -61,6 +68,11 @@ export const api = {
         listo: parsed.listo || false,
         settings: parsed.settings || {},
         project_type: parsed.project_type || 'space',
+        // Publicados por el worker: perfil de hardware detectado, etapa actual
+        // del pipeline y aviso de degradacion (p.ej. el 360 no cupo en la GPU).
+        hw: parsed.hw || null,
+        stage: parsed.stage || null,
+        degraded: parsed.degraded || null,
         created: item.created,
         thumb,
         files: (item.files || []).map(f => `${PB_URL}/api/files/hyworld_data/${item.id}/${f}`),
@@ -95,6 +107,9 @@ export const api = {
       listo: parsed.listo || false,
       settings: parsed.settings || {},
       project_type: parsed.project_type || 'space',
+      hw: parsed.hw || null,
+      stage: parsed.stage || null,
+      degraded: parsed.degraded || null,
       files: (item.files || []).map(f => `${PB_URL}/api/files/hyworld_data/${item.id}/${f}`),
       created: item.created,
       _raw: item.files || [],
@@ -121,14 +136,19 @@ export const api = {
       const current = await pbFetch(`/api/collections/hyworld_data/records/${id}`)
       parsed = typeof current.json === 'string' ? JSON.parse(current.json) : current.json
     } catch {}
-    // Calidad maxima fija para la malla final
-    const maxSettings = {
+    // Se respetan los settings del proyecto TAL CUAL.
+    //
+    // Antes se pisaban aqui con target_size/max_resolution/save_gs al maximo en
+    // CADA click de Generate, asi que los presets no hacian nada: eligieras
+    // Minima o Media, siempre se enviaba Maxima. Esa era la causa principal de
+    // los OOM en GPUs chicas. Quien acota ahora es el worker, contra el perfil
+    // de hardware real (hw_profile.clamp_settings_to_profile).
+    const settings = {
+      quality: 'max',                      // preset por defecto si nunca se eligio
       ...(parsed.settings || {}),
-      target_size: 1120, max_resolution: 2560,
-      apply_sky_mask: true, apply_edge_mask: true,
-      save_gs: true, save_points: true,
+      apply_sky_mask: true, apply_edge_mask: true, save_points: true,
     }
-    const jsonData = { ...parsed, settings: maxSettings, mesh: true, regenerate: true, status: 'pending', triggered_at: new Date().toISOString() }
+    const jsonData = { ...parsed, settings, mesh: true, regenerate: true, status: 'pending', stage: null, degraded: null, triggered_at: new Date().toISOString() }
     console.debug('[HYWorld] generateMesh', id, jsonData)
     return pbFetch(`/api/collections/hyworld_data/records/${id}`, {
       method: 'PATCH',

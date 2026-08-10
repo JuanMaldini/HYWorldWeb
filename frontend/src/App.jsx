@@ -1,6 +1,6 @@
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import { useState, useEffect } from 'react'
-import { isAuthenticated, getUser, pb, saveToken } from './lib/pocketbase'
+import { isAuthenticated, getUser, pb } from './lib/pocketbase'
 import Login from './pages/Login'
 import Dashboard from './pages/Dashboard'
 import Project from './pages/Project'
@@ -22,14 +22,12 @@ export default function App() {
   }, [])
 
   const handleLogin = (record, token) => {
-    saveToken(token)
     pb.authStore.save(token, record)
     setUser(record)
   }
 
   const handleLogout = () => {
     pb.authStore.clear()
-    localStorage.removeItem('pb_token')
     setUser(null)
   }
 

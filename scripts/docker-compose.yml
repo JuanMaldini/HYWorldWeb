@@ -1,15 +1,101 @@
 # ============================================================
 # HYWorld — docker-compose.yml
+#
+# Las rutas del host salen de HYWORLD_DATA / MODELS_DIR. Esos nombres
+# son INTERNOS: preflight.ps1 los escribe en scripts/.env a partir de
+# <repo>\.data — el usuario nunca los toca.
+#
+# Dentro de los contenedores TODO cuelga de /data — no hay rutas de
+# Windows hardcodeadas en ningun lado.
+#
+# scripts/.env lo genera preflight.ps1: sirve tanto para interpolar
+# ${VARS} aca como de env_file de los contenedores.
+#
+# Perfil "local": levanta ademas un PocketBase propio en :8092.
+# preflight.ps1 lo activa solo cuando PB_URL no apunta a una
+# instancia remota alcanzable.
 # ============================================================
 
+name: hyworld
+
 services:
-  hyworld:
+  # ── PocketBase local (solo modo local) ────────────────────
+  pocketbase:
+    image: ghcr.io/muchobien/pocketbase:latest
+    container_name: hyworld_pb
+    profiles: ["local"]
+    restart: unless-stopped
+    command:
+      - --http=0.0.0.0:8090
+      - --dir=/pb_data
+    ports:
+      - "8092:8090"
+    volumes:
+      - ${HYWORLD_DATA}/pocketbase:/pb_data
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8090/api/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+  # ── Asset Server (Hunyuan3D-2) ────────────────────────────
+  # Antes corria con el Python de Windows del host. Ahora vive aca:
+  # el host no necesita Python instalado.
+  # ON-DEMAND: preflight lo CREA pero no lo arranca (docker compose create).
+  # El worker lo enciende solo cuando llega un pedido desde el frontend, para
+  # no gastar VRAM ni minutos de carga de modelos si no se usa.
+  assets:
+    image: hyworld_assets:latest
+    build:
+      context: .
+      dockerfile: Dockerfile.assets
+    container_name: hyworld_assets
+    restart: "no"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    ports:
+      - "8081:8081"
+    volumes:
+      - ${HYWORLD_DATA}:/data
+      # preflight.ps1 siempre resuelve MODELS_DIR a una ruta absoluta.
+      # (compose no soporta ${A:-${B}/x} anidado, por eso no hay default aca)
+      - ${MODELS_DIR}:/data/models
+    environment:
+      - HY3D_SAVE_DIR=/data/projects/asset_cache
+      # HuggingFace cache -> volumen persistente (evita re-descarga).
+      # Sin token: descargas anonimas (funcionan, solo mas lentas).
+      - HF_HOME=/data/models
+      - HUGGINGFACE_HUB_CACHE=/data/models/hub
+    healthcheck:
+      test:
+        - CMD
+        - python3.11
+        - -c
+        - "import socket,sys; s=socket.create_connection(('127.0.0.1',8081),3); s.close()"
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 120s
+
+  # ── Worker ML ─────────────────────────────────────────────
+  worker:
     image: hyworld_ml:latest
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        # Arquitectura CUDA detectada por preflight.ps1 desde la GPU real.
+        # 8.6 = RTX 30xx (fallback si la deteccion falla).
+        TORCH_CUDA_ARCH_LIST: ${TORCH_CUDA_ARCH_LIST:-8.6}
     container_name: hyworld_ml
     restart: unless-stopped
+    # Sin depends_on de "assets" a proposito: se arranca on-demand.
     deploy:
       resources:
         reservations:
@@ -18,33 +104,32 @@ services:
               count: 1
               capabilities: [gpu]
     volumes:
-      - C:/HyWorldWebData:/c/HyWorldWebData
-      # MODELS_DIR viene de C:/HyWorldWebData/.env (start.bat lo exporta)
-      - ${MODELS_DIR:-C:/HyWorldWebData/models}:/c/HyWorldWebData/models
+      - ${HYWORLD_DATA}:/data
+      # preflight.ps1 siempre resuelve MODELS_DIR a una ruta absoluta.
+      # (compose no soporta ${A:-${B}/x} anidado, por eso no hay default aca)
+      - ${MODELS_DIR}:/data/models
       - .:/workspace/scripts
+      # Socket de Docker: el worker necesita encender el contenedor "assets"
+      # on-demand. Solo lectura no alcanza (hay que hacer POST /start).
+      # Contenedores Linux sobre Docker Desktop/WSL2 -> ruta unix, no el
+      # named pipe de Windows (ese es solo para contenedores Windows).
+      - /var/run/docker.sock:/var/run/docker.sock
     env_file:
-      - ../.env
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+      - .env
     environment:
       - CUDA_VISIBLE_DEVICES=0
       # expandable_segments rompe en WSL2 + offload de accelerate (HY-Pano):
       # "device not ready" / "!handles_.at(i) INTERNAL ASSERT" en el allocator.
       # max_split_size_mb reduce fragmentacion sin ese fallo.
       - PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:256
-      - HYWORLD_DIR=/c/HyWorldWebData/repo
-      - PROJECTS_DIR=/c/HyWorldWebData/projects
-      - LOGS_DIR=/c/HyWorldWebData/logs
-      - PYTHONPATH=/c/HyWorldWebData/repo/hyworld2/panogen:/c/HyWorldWebData/repo
-      # Modelos HuggingFace → volumen persistente (evita re-descarga en cada arranque)
-      - HF_HOME=/c/HyWorldWebData/models
-      - HUGGINGFACE_HUB_CACHE=/c/HyWorldWebData/models/hub
-      - TRANSFORMERS_CACHE=/c/HyWorldWebData/models/hub
-      # Asset server (Hunyuan3D-2 corriendo en Windows host)
-      - ASSET_SERVER_URL=http://host.docker.internal:8081
-      # Token HuggingFace — viene de C:/HyWorldWebData/.env (start.bat lo exporta)
-      - HF_TOKEN=${HF_TOKEN:-}
-      - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN:-}
+      - HYWORLD_DIR=/data/repo
+      - PROJECTS_DIR=/data/projects
+      - LOGS_DIR=/data/logs
+      - PYTHONPATH=/data/repo/hyworld2/panogen:/data/repo
+      # Modelos HuggingFace -> volumen persistente (evita re-descarga)
+      - HF_HOME=/data/models
+      - HUGGINGFACE_HUB_CACHE=/data/models/hub
+      - ASSET_SERVER_URL=http://assets:8081
     healthcheck:
       test: ["CMD", "python3.11", "-c", "import torch; assert torch.cuda.is_available()"]
       interval: 30s
