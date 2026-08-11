@@ -708,7 +708,7 @@ if ($ok) {
         Write-Log "               (guardado en $RootEnv)"
     }
     if (-not $Web) {
-        Write-Log '  Logs del worker: en Docker Desktop (contenedor hyworld_ml)'
+        Write-Log "  Logs      : docker logs -f hyworld_ml  (start.bat lo engancha solo)"
     }
     if (-not $NoBrowser) { Start-Process 'http://localhost:5173' }
     exit 0

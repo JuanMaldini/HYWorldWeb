@@ -35,22 +35,19 @@ export default function Project({ user }) {
       }
     }
     load()
-    const t = setInterval(async () => {
-      try {
-        const all = await api.getProjects()
-        const found = all.find(p => p.slug === slug)
-        if (found) {
-          const d = await api.getProject(found.id)
-          setProject(prev => prev ? {
-            ...prev, status: found.status, listo: found.listo, files: d.files,
-            // El worker publica estos tres durante la corrida: perfil de
-            // hardware, etapa en curso y aviso de degradacion.
-            hw: d.hw ?? prev.hw, stage: d.stage, degraded: d.degraded,
-          } : prev)
-        }
-      } catch (err) { /* silencioso */ }
-    }, 4000)
-    return () => clearInterval(t)
+    // Realtime (SSE): el worker publica status, stage, hw y degraded en el
+    // record y la vista los refleja al instante, sin el retardo de hasta 4 s
+    // del sondeo anterior — que ademas disparaba 2 peticiones por ciclo.
+    const stop = api.subscribeProjects((action, record) => {
+      if (!record || record.slug !== slug) return
+      if (action === 'delete') return
+      setProject(prev => prev ? {
+        ...prev, ...record,
+        // hw solo se publica al arrancar una generacion: no lo borres entre corridas.
+        hw: record.hw ?? prev.hw,
+      } : record)
+    })
+    return stop
   }, [slug])
 
   const toggleListo = async () => {
@@ -73,7 +70,8 @@ export default function Project({ user }) {
     // max_points). Ahora la calidad viaja como `quality` y es el worker quien
     // la resuelve contra el hardware real; dejar las viejas fijaria una
     // resolucion antigua por debajo del preset elegido.
-    const { target_size, max_resolution, max_points, ...rest } = settings
+    const rest = { ...settings }
+    for (const k of LEGACY_SETTING_KEYS) delete rest[k]
     const next = { ...rest, ...patch }
     setSettings(next)
     try { await api.updateProjectSettings(project.id, next) } catch (e) { console.error(e) }
@@ -193,7 +191,9 @@ export default function Project({ user }) {
         </div>
 
         {/* GenStatus */}
-        <GenStatus status={project.status} hasPano={panos.length > 0}
+        {/* key={status}: al cambiar de estado el componente se remonta y el
+            cronometro arranca de cero sin tocar estado dentro del efecto. */}
+        <GenStatus key={project.status} status={project.status} hasPano={panos.length > 0}
           stage={project.stage} degraded={project.degraded} />
 
         {/* 2-column layout */}
@@ -403,6 +403,11 @@ const PRESETS = [
   { id: 'max', label: 'Máxima',  hint: 'Todo el detalle que dé la GPU' },
 ]
 
+// Claves de settings de la version anterior: valores absolutos de resolucion
+// que hoy resuelve el worker a partir de `quality` y del hardware detectado.
+// Se purgan al guardar para que un proyecto viejo no quede clavado en ellas.
+const LEGACY_SETTING_KEYS = ['target_size', 'max_resolution', 'max_points']
+
 const DEF = {
   full_360: false,
   quality: 'max',
@@ -557,7 +562,10 @@ const STAGES = [
 function GenStatus({ status, hasPano, stage, degraded }) {
   const [sec, setSec] = useState(0)
   useEffect(() => {
-    if (status !== 'processing') { setSec(0); return }
+    // Sin setSec(0) aqui: el contador se reinicia remontando el componente
+    // (el padre le pasa key={status}). Poner estado en el cuerpo del efecto
+    // encadena renders innecesarios.
+    if (status !== 'processing') return undefined
     const t0 = Date.now()
     const id = setInterval(() => setSec(Math.floor((Date.now() - t0) / 1000)), 1000)
     return () => clearInterval(id)

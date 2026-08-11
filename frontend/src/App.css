@@ -217,6 +217,20 @@ code { font-family: 'JetBrains Mono', ui-monospace, monospace; }
 .btn-delete:hover { background: var(--surface-2); opacity: 1; }
 .project-meta { display: flex; gap: 14px; font-size: 12px; color: var(--text-dim); align-items: center; }
 
+/* Etiquetas de la tarjeta: tipo, modo 360/frente, preset y aviso de degradado.
+   Antes la tarjeta solo mostraba nombre y estado, asi que no se podia saber
+   como se habia generado un proyecto sin entrar en el. */
+.card-tags { display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 10px; }
+.card-tag {
+  font-size: 10.5px; font-weight: 600; letter-spacing: .2px;
+  padding: 2px 7px; border-radius: 5px;
+  background: var(--bg-dark); color: var(--text-dim);
+  border: 1px solid var(--border); white-space: nowrap;
+}
+.card-tag-warn {
+  background: #2d1b22; color: var(--danger); border-color: #5a2a3a;
+}
+
 /* ─── Status badges ──────────────────────────────────────── */
 .status {
   display: inline-block;

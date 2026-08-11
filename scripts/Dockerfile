@@ -49,7 +49,8 @@ RUN pip install --no-cache-dir \
     torchmetrics loguru==0.7.3 tqdm viser tyro==1.0.8 splines \
     pymeshlab==2023.12.post2 scikit-build-core nanobind pybind11 \
     numpy==1.26.4 psutil requests \
-    docker==7.1.0
+    docker==7.1.0 \
+    python-dotenv py360convert
 
 # cupy
 RUN pip install --no-cache-dir cupy-cuda12x==13.6.0

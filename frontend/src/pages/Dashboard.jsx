@@ -1,9 +1,11 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { useNavigate, Link } from 'react-router-dom'
 import { api, isLocalMode } from '../lib/pocketbase'
 import '../App.css'
 
-export default function Dashboard({ user, onLogout, onLogin }) {
+// App pasa tambien onLogin, pero aqui el acceso se hace navegando a /login
+// (el enlace de la topbar), asi que no se declara.
+export default function Dashboard({ user, onLogout }) {
   const [projects, setProjects] = useState([])
   const [loading, setLoading] = useState(true)
   const [showModal, setShowModal] = useState(false)
@@ -18,7 +20,7 @@ export default function Dashboard({ user, onLogout, onLogin }) {
   const [deleting, setDeleting] = useState(false)
   const navigate = useNavigate()
 
-  const fetchProjects = async () => {
+  const fetchProjects = useCallback(async () => {
     try {
       const data = await api.getProjects()
       setProjects(data)
@@ -27,13 +29,33 @@ export default function Dashboard({ user, onLogout, onLogin }) {
     } finally {
       setLoading(false)
     }
-  }
+  }, [])
 
   useEffect(() => {
-    fetchProjects()
-    const t = setInterval(fetchProjects, 5000)
-    return () => clearInterval(t)
-  }, [])
+    // Carga inicial: es asincrona (el estado se fija cuando resuelve la
+    // promesa, no en el cuerpo del efecto), pero la regla no puede verlo a
+    // traves de la llamada. Es el patron recomendado de "suscribirse a un
+    // sistema externo + semilla inicial".
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    void fetchProjects()
+    // Realtime (SSE) en vez de sondear cada 5 s: el worker escribe status y
+    // stage en el record y la tarjeta se actualiza al instante. Si el servidor
+    // no soporta realtime, subscribeProjects avisa y caemos al sondeo lento.
+    let poll = null
+    const stop = api.subscribeProjects((action, record) => {
+      if (!record) return
+      setProjects(ps => {
+        if (action === 'delete') return ps.filter(p => p.id !== record.id)
+        const i = ps.findIndex(p => p.id === record.id)
+        if (i === -1) return action === 'create' ? [record, ...ps] : ps
+        const next = [...ps]; next[i] = record
+        return next
+      })
+    })
+    // Red de seguridad: una recarga espaciada por si se cae la conexion SSE.
+    poll = setInterval(fetchProjects, 60000)
+    return () => { stop(); if (poll) clearInterval(poll) }
+  }, [fetchProjects])
 
   const handleFileChange = (selected) => {
     if (!selected.length) return
@@ -193,8 +215,26 @@ export default function Dashboard({ user, onLogout, onLogin }) {
                       >🗑</button>
                     )}
                   </div>
+                  <div className="card-tags">
+                    <Tag title={p.project_type === 'asset' ? 'Objeto 3D' : 'Espacio 3D'}>
+                      {p.project_type === 'asset' ? '🧊 Asset' : '🌍 Space'}
+                    </Tag>
+                    {p.project_type !== 'asset' && (
+                      <Tag title={p.settings?.full_360
+                        ? 'Espacio 360 completo (paredes, techo y suelo)'
+                        : 'Solo la vista frontal'}>
+                        {p.settings?.full_360 ? '360°' : 'Frente'}
+                      </Tag>
+                    )}
+                    {p.project_type !== 'asset' && p.settings?.quality && (
+                      <Tag title="Preset de calidad">{QUALITY_LABEL[p.settings.quality] || p.settings.quality}</Tag>
+                    )}
+                    {p.degraded && (
+                      <Tag title={p.degraded} tone="warn">⚠ Degradado</Tag>
+                    )}
+                  </div>
                   <div className="project-meta">
-                    <Status s={p.status} />
+                    <Status s={p.status} stage={p.stage} />
                     <span>{new Date(p.created).toLocaleDateString()}</span>
                   </div>
                 </div>
@@ -391,7 +431,24 @@ export default function Dashboard({ user, onLogout, onLogin }) {
   )
 }
 
-function Status({ s }) {
+const QUALITY_LABEL = { min: 'Mínima', med: 'Media', max: 'Máxima' }
+
+// Etapas que publica el worker en json.stage (ver worker.process).
+const STAGE_LABEL = {
+  pano:      'Panorama',
+  multiview: 'Vistas',
+  recon:     'Reconstruyendo',
+}
+
+function Tag({ children, title, tone }) {
+  return (
+    <span className={`card-tag${tone === 'warn' ? ' card-tag-warn' : ''}`} title={title}>
+      {children}
+    </span>
+  )
+}
+
+function Status({ s, stage }) {
   const map = {
     pending:    ['En espera', 'dot-wait'],
     processing: ['Generando', 'dot-proc'],
@@ -399,9 +456,13 @@ function Status({ s }) {
     error:      ['Error', ''],
   }
   const [label, dot] = map[s] || [s, '']
+  // Durante el procesado se muestra la etapa concreta en vez de un generico
+  // "Generando": el panorama solo puede tardar varios minutos y sin esto la
+  // tarjeta parecia congelada.
+  const text = (s === 'processing' && STAGE_LABEL[stage]) ? STAGE_LABEL[stage] : label
   return (
     <span className={`status status-${s}`}>
-      {dot && <span className={`dot ${dot}`} />}{label}
+      {dot && <span className={`dot ${dot}`} />}{text}
     </span>
   )
 }

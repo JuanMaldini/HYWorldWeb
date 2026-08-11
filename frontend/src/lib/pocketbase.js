@@ -12,6 +12,9 @@ export const pb = new PocketBase(PB_URL)
 export const isLocalMode = /^https?:\/\/(localhost|127\.0\.0\.1)/i.test(PB_URL)
 export const pbUrl = PB_URL
 
+const COLLECTION = 'hyworld_data'
+const col = () => pb.collection(COLLECTION)
+
 export const login = async (email, password) => {
   const authData = await pb.collection('hyworld_user').authWithPassword(email, password)
   return authData
@@ -23,7 +26,7 @@ export const logout = () => {
 
 export const isAuthenticated = () => pb.authStore.isValid
 
-export const getUser = () => pb.authStore.model
+export const getUser = () => pb.authStore.record || pb.authStore.model
 
 function generateSlug(filename) {
   // slug = {nombre_sin_ext}_{hash6} — se genera del nombre del archivo, no del input del usuario
@@ -32,52 +35,84 @@ function generateSlug(filename) {
   return `${nameWithoutExt}_${hash}`
 }
 
-// El token vive solo en pb.authStore (el SDK ya lo persiste en localStorage).
-// Antes se guardaba ademas una copia suelta en 'pb_token' que podia quedar
-// desincronizada del authStore al expirar o al hacer logout.
-async function pbFetch(path, opts = {}) {
-  const base = PB_URL
-  const token = pb.authStore.token || ''
-  const headers = {}
-  if (token) headers['Authorization'] = `Bearer ${token}`
-  if (opts.body && !(opts.body instanceof FormData)) {
-    headers['Content-Type'] = 'application/json'
+// ── Helpers ───────────────────────────────────────────────────────────
+// El SDK arma la URL del archivo y, si la coleccion pasara a ser protegida,
+// tambien el token: es preferible a concatenar rutas a mano.
+const fileUrlOf = (record, filename) => pb.files.getURL(record, filename)
+
+// El campo `json` guarda todo el estado del proyecto como blob. PocketBase lo
+// devuelve como objeto o como string segun el esquema, asi que se normaliza en
+// un solo sitio en vez de repetir el try/catch en cada metodo.
+function readJson(record) {
+  const raw = record?.json
+  if (!raw) return {}
+  if (typeof raw !== 'string') return raw
+  try { return JSON.parse(raw) } catch { return {} }
+}
+
+function mapRecord(item) {
+  const parsed = readJson(item)
+  const files = item.files || []
+  return {
+    id: item.id,
+    slug: parsed.slug || item.id,
+    name: parsed.name || item.id,
+    status: parsed.status || 'pending',
+    listo: parsed.listo || false,
+    settings: parsed.settings || {},
+    project_type: parsed.project_type || 'space',
+    // Publicados por el worker: perfil de hardware detectado, etapa actual
+    // del pipeline y aviso de degradacion (p.ej. el 360 no cupo en la GPU).
+    hw: parsed.hw || null,
+    stage: parsed.stage || null,
+    degraded: parsed.degraded || null,
+    created: item.created,
+    thumb: files.length ? fileUrlOf(item, files[0]) : '',
+    files: files.map(f => fileUrlOf(item, f)),
+    _raw: files,
   }
-  const res = await fetch(`${base}${path}`, { ...opts, headers })
-  const text = await res.text()
-  if (!res.ok) throw new Error(`PB Error ${res.status}: ${text}`)
-  if (!text) return null
-  try { return JSON.parse(text) } catch { return text }
+}
+
+// Lee-modifica-escribe sobre el blob `json`. Se releé SIEMPRE justo antes de
+// escribir para reducir la ventana en la que el worker (que escribe status y
+// stage en el mismo campo) pueda quedar pisado.
+async function patchJson(id, mutate) {
+  const current = await col().getOne(id, { requestKey: null })
+  const next = mutate(readJson(current))
+  return col().update(id, { json: JSON.stringify(next) })
 }
 
 export const api = {
   async getProjects() {
-    const data = await pbFetch('/api/collections/hyworld_data/records?sort=-created&perPage=100')
-    if (!data?.items) return []
-    return data.items.map(item => {
-      let parsed = {}
-      try { parsed = typeof item.json === 'string' ? JSON.parse(item.json) : item.json } catch {}
-      const thumb = item.files?.length > 0
-        ? `${PB_URL}/api/files/hyworld_data/${item.id}/${item.files[0]}`
-        : ''
-      return {
-        id: item.id,
-        slug: parsed.slug || item.id,
-        name: parsed.name || item.id,
-        status: parsed.status || 'pending',
-        listo: parsed.listo || false,
-        settings: parsed.settings || {},
-        project_type: parsed.project_type || 'space',
-        // Publicados por el worker: perfil de hardware detectado, etapa actual
-        // del pipeline y aviso de degradacion (p.ej. el 360 no cupo en la GPU).
-        hw: parsed.hw || null,
-        stage: parsed.stage || null,
-        degraded: parsed.degraded || null,
-        created: item.created,
-        thumb,
-        files: (item.files || []).map(f => `${PB_URL}/api/files/hyworld_data/${item.id}/${f}`),
-      }
+    // requestKey: null desactiva la auto-cancelacion del SDK. Sin esto, dos
+    // vistas pidiendo la lista a la vez (o un refresco solapado) abortan la
+    // peticion anterior con ClientResponseError 0.
+    const items = await col().getFullList({
+      sort: '-created', batch: 100, requestKey: null,
     })
+    return items.map(mapRecord)
+  },
+
+  async getProject(id) {
+    const item = await col().getOne(id, { requestKey: null })
+    return item ? mapRecord(item) : null
+  },
+
+  // Suscripcion en tiempo real (SSE). Sustituye al sondeo cada 4-5 s: el
+  // cambio de etapa del worker se ve al instante y desaparecen ~700 peticiones
+  // por hora y pestana abierta.
+  // Devuelve una funcion para cancelar.
+  subscribeProjects(onChange) {
+    let unsub = null
+    let cancelled = false
+    col().subscribe('*', (e) => onChange(e.action, e.record ? mapRecord(e.record) : null),
+                    { requestKey: null })
+      .then(fn => { if (cancelled) fn(); else unsub = fn })
+      .catch(err => console.warn('[HYWorld] realtime no disponible:', err?.message || err))
+    return () => {
+      cancelled = true
+      if (unsub) { try { unsub() } catch { /* ya desconectado */ } }
+    }
   },
 
   async createProject(name, files, inputType = 'image', projectType = 'space') {
@@ -91,51 +126,18 @@ export const api = {
     const formData = new FormData()
     formData.append('json', JSON.stringify(jsonData))
     for (const f of files) formData.append('files', f)
-    return pbFetch('/api/collections/hyworld_data/records', { method: 'POST', body: formData })
+    return col().create(formData)
   },
 
-  async getProject(id) {
-    const item = await pbFetch(`/api/collections/hyworld_data/records/${id}`)
-    if (!item) return null
-    let parsed = {}
-    try { parsed = typeof item.json === 'string' ? JSON.parse(item.json) : item.json } catch {}
-    return {
-      id: item.id,
-      slug: parsed.slug || item.id,
-      name: parsed.name || item.id,
-      status: parsed.status || 'pending',
-      listo: parsed.listo || false,
-      settings: parsed.settings || {},
-      project_type: parsed.project_type || 'space',
-      hw: parsed.hw || null,
-      stage: parsed.stage || null,
-      degraded: parsed.degraded || null,
-      files: (item.files || []).map(f => `${PB_URL}/api/files/hyworld_data/${item.id}/${f}`),
-      created: item.created,
-      _raw: item.files || [],
-    }
-  },
-
-  async updateProjectStatus(id, listo) {
-    let parsed = {}
-    try {
-      const current = await pbFetch(`/api/collections/hyworld_data/records/${id}`)
-      parsed = typeof current.json === 'string' ? JSON.parse(current.json) : current.json
-    } catch {}
+  updateProjectStatus(id, listo) {
     // ON => el proyecto queda 'pending' (a la espera del worker, aunque no este activo)
-    const jsonData = { ...parsed, listo, status: listo ? 'pending' : (parsed.status === 'processing' ? 'processing' : parsed.status || 'pending') }
-    return pbFetch(`/api/collections/hyworld_data/records/${id}`, {
-      method: 'PATCH',
-      body: JSON.stringify({ json: JSON.stringify(jsonData) }),
-    })
+    return patchJson(id, p => ({
+      ...p, listo,
+      status: listo ? 'pending' : (p.status === 'processing' ? 'processing' : p.status || 'pending'),
+    }))
   },
 
-  async generateMesh(id) {
-    let parsed = {}
-    try {
-      const current = await pbFetch(`/api/collections/hyworld_data/records/${id}`)
-      parsed = typeof current.json === 'string' ? JSON.parse(current.json) : current.json
-    } catch {}
+  generateMesh(id) {
     // Se respetan los settings del proyecto TAL CUAL.
     //
     // Antes se pisaban aqui con target_size/max_resolution/save_gs al maximo en
@@ -143,78 +145,53 @@ export const api = {
     // Minima o Media, siempre se enviaba Maxima. Esa era la causa principal de
     // los OOM en GPUs chicas. Quien acota ahora es el worker, contra el perfil
     // de hardware real (hw_profile.clamp_settings_to_profile).
-    const settings = {
-      quality: 'max',                      // preset por defecto si nunca se eligio
-      ...(parsed.settings || {}),
-      apply_sky_mask: true, apply_edge_mask: true, save_points: true,
-    }
-    const jsonData = { ...parsed, settings, mesh: true, regenerate: true, status: 'pending', stage: null, degraded: null, triggered_at: new Date().toISOString() }
-    console.debug('[HYWorld] generateMesh', id, jsonData)
-    return pbFetch(`/api/collections/hyworld_data/records/${id}`, {
-      method: 'PATCH',
-      body: JSON.stringify({ json: JSON.stringify(jsonData) }),
-    })
+    return patchJson(id, p => ({
+      ...p,
+      settings: {
+        quality: 'max',                  // preset por defecto si nunca se eligio
+        ...(p.settings || {}),
+        apply_sky_mask: true, apply_edge_mask: true, save_points: true,
+      },
+      mesh: true, regenerate: true, status: 'pending',
+      stage: null, degraded: null,
+      triggered_at: new Date().toISOString(),
+    }))
   },
 
-  async regenerate(id) {
-    let parsed = {}
-    try {
-      const current = await pbFetch(`/api/collections/hyworld_data/records/${id}`)
-      parsed = typeof current.json === 'string' ? JSON.parse(current.json) : current.json
-    } catch {}
-    const jsonData = { ...parsed, regenerate: true, status: 'pending', triggered_at: new Date().toISOString() }
-    console.debug('[HYWorld] regenerate', id, jsonData)
-    return pbFetch(`/api/collections/hyworld_data/records/${id}`, {
-      method: 'PATCH',
-      body: JSON.stringify({ json: JSON.stringify(jsonData) }),
-    })
+  regenerate(id) {
+    return patchJson(id, p => ({
+      ...p, regenerate: true, status: 'pending',
+      stage: null, degraded: null,
+      triggered_at: new Date().toISOString(),
+    }))
   },
 
-  async updateProjectSettings(id, settings) {
-    let parsed = {}
-    try {
-      const current = await pbFetch(`/api/collections/hyworld_data/records/${id}`)
-      parsed = typeof current.json === 'string' ? JSON.parse(current.json) : current.json
-    } catch {}
-    const jsonData = { ...parsed, settings }
-    return pbFetch(`/api/collections/hyworld_data/records/${id}`, {
-      method: 'PATCH',
-      body: JSON.stringify({ json: JSON.stringify(jsonData) }),
-    })
+  updateProjectSettings(id, settings) {
+    return patchJson(id, p => ({ ...p, settings }))
   },
 
-  async triggerProcessing(id) {
-    let parsed = {}
-    try {
-      const current = await pbFetch(`/api/collections/hyworld_data/records/${id}`)
-      parsed = typeof current.json === 'string' ? JSON.parse(current.json) : current.json
-    } catch {}
-    const jsonData = { ...parsed, status: 'processing', triggered_at: new Date().toISOString() }
-    return pbFetch(`/api/collections/hyworld_data/records/${id}`, {
-      method: 'PATCH',
-      body: JSON.stringify({ json: JSON.stringify(jsonData) }),
-    })
+  triggerProcessing(id) {
+    return patchJson(id, p => ({
+      ...p, status: 'processing', triggered_at: new Date().toISOString(),
+    }))
   },
 
   async uploadImages(id, files) {
     const formData = new FormData()
     for (const f of files) formData.append('files', f)
-    return pbFetch(`/api/collections/hyworld_data/records/${id}`, { method: 'PATCH', body: formData })
+    return col().update(id, formData)
   },
 
-  async deleteProject(id) {
-    return pbFetch(`/api/collections/hyworld_data/records/${id}`, { method: 'DELETE' })
+  deleteProject(id) {
+    return col().delete(id)
   },
 
-  async deleteFile(id, filename) {
-    // PocketBase: send "files-": [filename] to remove a specific file from the files field
-    return pbFetch(`/api/collections/hyworld_data/records/${id}`, {
-      method: 'PATCH',
-      body: JSON.stringify({ 'files-': [filename] }),
-    })
+  deleteFile(id, filename) {
+    // PocketBase: "files-" elimina un archivo concreto del campo multi-archivo
+    return col().update(id, { 'files-': [filename] })
   },
 
   fileUrl(recordId, filename) {
-    return `${PB_URL}/api/files/hyworld_data/${recordId}/${filename}`
+    return pb.files.getURL({ id: recordId, collectionId: COLLECTION, collectionName: COLLECTION }, filename)
   },
 }

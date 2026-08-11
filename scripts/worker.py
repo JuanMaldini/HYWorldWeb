@@ -79,13 +79,21 @@ os.makedirs(PROJECTS_DIR, exist_ok=True)
 os.makedirs(LOGS_DIR, exist_ok=True)
 
 # ── .env loading ─────────────────────────────────────────────────────────
+# python-dotenv en vez del parseo a mano: maneja comillas, escapes, valores con
+# '=' dentro y continuaciones. El parser anterior partia por el primer '=' y
+# hacia strip, asi que una contrasena entre comillas o con espacios al final
+# entraba mal — y la del worker se lee justamente de aqui.
 ENV_FILE = os.path.join(ROOT_DIR, ".env")
-if os.path.exists(ENV_FILE):
-    for line in open(ENV_FILE, encoding="utf-8"):
-        line = line.strip()
-        if "=" in line and not line.startswith("#"):
-            k, v = line.split("=", 1)
-            os.environ.setdefault(k.strip(), v.strip())
+try:
+    from dotenv import load_dotenv
+    load_dotenv(ENV_FILE, override=False)
+except ImportError:
+    if os.path.exists(ENV_FILE):
+        for line in open(ENV_FILE, encoding="utf-8"):
+            line = line.strip()
+            if "=" in line and not line.startswith("#"):
+                k, v = line.split("=", 1)
+                os.environ.setdefault(k.strip(), v.strip())
 
 # CRITICAL: hunyuan_image_3 lives inside hyworld2/panogen/ — add both
 # HYWORLD_DIR (for `import hyworld2`) and the panogen dir (for
@@ -225,31 +233,49 @@ def _is_oom_error(e):
             or "device-side assert" in s or "illegal memory" in s)
 
 # ── Logging ──────────────────────────────────────────────────────────────
-log_file = os.path.join(LOGS_DIR, "worker_" + datetime.now().strftime("%Y%m%d") + ".log")
+# Rotacion diaria con retencion, delegada a la stdlib
+# (logging.handlers.TimedRotatingFileHandler): rota a medianoche y conserva
+# backupCount archivos. Sustituye al barrido manual por mtime que habia antes,
+# que ademas de reimplementar la rueda borraba por coincidencia de subcadena en
+# el nombre.
+from logging.handlers import TimedRotatingFileHandler
+
+MAX_LOG_AGE_DAYS = 2       # dias de historial que conserva la rotacion
+
+log_file = os.path.join(LOGS_DIR, "worker.log")
+dbg_file = os.path.join(LOGS_DIR, "debug.log")
+
 
 class _Fmt(logging.Formatter):
     def format(self, record):
         ts = datetime.fromtimestamp(record.created).strftime("%H:%M:%S")
         return "{} [{:<4}] {}".format(ts, record.levelname[:4], record.getMessage())
 
+
+def _rotating(path, days):
+    h = TimedRotatingFileHandler(path, when="midnight", backupCount=days,
+                                 encoding="utf-8", delay=True)
+    h.suffix = "%Y%m%d"          # worker.log.20260810
+    h.setLevel(logging.DEBUG)
+    h.setFormatter(_Fmt())
+    return h
+
+
 log = logging.getLogger("worker")
 log.setLevel(logging.DEBUG)
 _sh = logging.StreamHandler(sys.stdout); _sh.setLevel(logging.DEBUG); _sh.setFormatter(_Fmt())
-# Solo agregar FileHandler si el entrypoint NO está redirigiendo stdout al log.
+# Solo agregar handler de archivo si el entrypoint NO está redirigiendo stdout al log.
 # En Docker, entrypoint.sh ya hace `exec > >(tee -a "$LOG_FILE")`, por lo que
-# agregar otro FileHandler al mismo archivo causaría que cada línea aparezca dos veces.
+# agregar otro handler al mismo archivo causaría que cada línea aparezca dos veces.
 _IN_DOCKER = os.path.exists("/.dockerenv") or os.environ.get("HYWORLD_DIR", "").startswith("/data")
 if not _IN_DOCKER:
-    _fh = logging.FileHandler(log_file, encoding="utf-8"); _fh.setLevel(logging.DEBUG); _fh.setFormatter(_Fmt())
-    log.handlers = [_fh, _sh]
+    log.handlers = [_rotating(log_file, MAX_LOG_AGE_DAYS), _sh]
 else:
     log.handlers = [_sh]
 
-dbg_file = os.path.join(LOGS_DIR, "debug_" + datetime.now().strftime("%Y%m%d") + ".log")
 dbg = logging.getLogger("debug")
 dbg.setLevel(logging.DEBUG)
-_dh = logging.FileHandler(dbg_file, encoding="utf-8"); _dh.setFormatter(_Fmt())
-dbg.handlers = [_dh]
+dbg.handlers = [_rotating(dbg_file, MAX_LOG_AGE_DAYS)]
 
 
 def dump_record(rid, tag):
@@ -262,77 +288,67 @@ def dump_record(rid, tag):
         dbg.warning("[%s] id=%s no se pudo leer record: %s" % (tag, rid, e))
 
 
-# ── Log cleanup: delete log files older than MAX_LOG_AGE_DAYS ─────────────
-MAX_LOG_AGE_DAYS = 2
-
-def _cleanup_old_logs():
-    """Borra archivos de log en LOGS_DIR que tengan más de MAX_LOG_AGE_DAYS días.
-    Preserva el log del día actual. Esto evita que los logs crezcan indefinidamente
-    y garantiza tener siempre al menos 2 días de historial para debugging."""
-    try:
-        if not os.path.isdir(LOGS_DIR):
-            return
-        now = time.time()
-        cutoff = now - (MAX_LOG_AGE_DAYS * 86400)
-        removed = 0
-        for fname in os.listdir(LOGS_DIR):
-            fpath = os.path.join(LOGS_DIR, fname)
-            if not os.path.isfile(fpath):
-                continue
-            # Only touch known log file patterns
-            base = os.path.splitext(fname)[0]
-            if not any(pattern in base for pattern in ("worker", "debug", "asset_server")):
-                continue
-            try:
-                mtime = os.path.getmtime(fpath)
-            except Exception:
-                continue
-            if mtime < cutoff:
-                try:
-                    os.remove(fpath)
-                    removed += 1
-                    log.debug("  Limpieza logs: borrado %s (%.1f días)" % (fname, (now - mtime) / 86400))
-                except Exception:
-                    pass
-        if removed:
-            log.info("  Limpieza logs: %d archivo(s) de más de %d días eliminado(s)" % (removed, MAX_LOG_AGE_DAYS))
-        else:
-            log.debug("  Limpieza logs: ningún archivo antiguo")
-    except Exception as e:
-        log.debug("  Limpieza logs: no se pudo ejecutar: %s" % e)
+# ── Retencion de logs ─────────────────────────────────────────────────────
+# La gestiona TimedRotatingFileHandler (ver la construccion del logger arriba).
+# Antes habia un barrido manual por mtime que borraba cualquier archivo cuyo
+# nombre contuviera "worker"/"debug"/"asset_server" — un criterio por subcadena
+# capaz de llevarse por delante archivos ajenos que cayeran en el directorio.
+# El handler solo toca los archivos que el mismo creo.
 
 
 # ── HuggingFace cache cleanup (on startup — remove *.incomplete garbage) ──
 def _cleanup_hf_cache():
-    """Borra archivos *.incomplete en el cache de HuggingFace para evitar
-    que ocupen espacio inútilmente. Solo elimina los incompletos;
-    los completos se preservan. Esto permite descargas limpias cuando
-    una descarga anterior fue interrumpida.
-    Usa HF_HOME si está definido (volumen persistente); si no, fallback al default."""
+    """Libera el espacio de descargas interrumpidas en el cache de HuggingFace.
+
+    Usa `huggingface_hub.scan_cache_dir()`, la API oficial, en vez de recorrer
+    el arbol a mano borrando *.incomplete y *.lock. Dos motivos de peso:
+      - los .lock son de un mutex entre procesos; borrarlos a ciegas mientras
+        otro proceso descarga es una condicion de carrera que puede corromper
+        el cache. La API solo toca lo que sabe que esta huerfano.
+      - el layout del cache (snapshots/blobs/refs) es un detalle interno que ya
+        ha cambiado entre versiones; la API se mantiene estable.
+    """
+    # La ruta del cache la resuelve la libreria (HF_HUB_CACHE), no una cadena
+    # de fallbacks a mano: el layout ya cambio entre versiones.
+    hf_base = None
     try:
+        from huggingface_hub.constants import HF_HUB_CACHE
+        hf_base = HF_HUB_CACHE
+    except Exception:
         hf_home = os.environ.get("HF_HOME") or os.environ.get("HUGGINGFACE_HUB_CACHE")
         if hf_home:
-            hf_base = os.path.join(hf_home, "hub") if not hf_home.endswith("hub") else hf_home
+            hf_base = hf_home if hf_home.endswith("hub") else os.path.join(hf_home, "hub")
         else:
             hf_base = os.path.expanduser(os.path.join("~", ".cache", "huggingface", "hub"))
-        if not os.path.isdir(hf_base):
-            return
-        removed = 0
+    if not hf_base or not os.path.isdir(hf_base):
+        return
+
+    # Solo *.incomplete: son restos de una descarga cortada y nadie los reclama.
+    #
+    # Ya NO se borran los *.lock. Son el mutex entre procesos de filelock, y el
+    # worker comparte /data/models con el contenedor de assets: borrar un lock
+    # vivo mientras el otro proceso descarga es una carrera que puede dejar el
+    # cache corrupto. Un lock huerfano no ocupa espacio ni bloquea de forma
+    # permanente; un blob a medio escribir, si.
+    removed, freed_gb = 0, 0.0
+    try:
         for root, _dirs, files in os.walk(hf_base):
             for f in files:
-                if f.endswith(".incomplete") or f.endswith(".lock"):
-                    try:
-                        path = os.path.join(root, f)
-                        size = os.path.getsize(path) / 1e9
-                        os.remove(path)
-                        removed += 1
-                        log.debug("  Limpieza: borrado %s (%.1f GB)" % (f, size))
-                    except Exception:
-                        pass
+                if not f.endswith(".incomplete"):
+                    continue
+                path = os.path.join(root, f)
+                try:
+                    size = os.path.getsize(path)
+                    os.remove(path)
+                    removed += 1
+                    freed_gb += size / 1e9
+                except Exception:
+                    pass
         if removed:
-            log.info("  Limpieza HuggingFace: %d archivo(s) incompleto(s) eliminado(s)" % removed)
+            log.info("  Limpieza HuggingFace: %d descarga(s) incompleta(s), %.1f GB liberados" % (
+                removed, freed_gb))
         else:
-            log.debug("  Limpieza HuggingFace: no habia archivos incompletos")
+            log.debug("  Limpieza HuggingFace: sin descargas incompletas")
     except Exception as e:
         log.debug("  Limpieza HuggingFace: no se pudo ejecutar: %s" % e)
 
@@ -342,7 +358,6 @@ ML_READY = False
 ML_REASON = "sin comprobar"
 
 def check_ml_env():
-    _cleanup_old_logs()  # Purge logs older than MAX_LOG_AGE_DAYS
     _cleanup_hf_cache()  # Always run cleanup on startup
     log.info("-" * 60)
     log.info("HYWorld ML Worker v3 (HY-Pano → multi-view → WorldMirror)")
@@ -882,6 +897,20 @@ def extract_multiview_from_panorama(slug, orig_filename, prof):
              "desde panorama %dx%d" % (slug, n_views, prof.n_horizontal,
                                        prof.n_ring, fov_deg, out_side, pano_w, pano_h))
 
+    def _sample_lib(azimuth_deg, elev_deg):
+        """Vista en perspectiva con py360convert (implementacion de referencia).
+
+        Convenciones de py360convert.e2p:
+          u_deg en [-180, 180], 0 = columna central del equirectangular
+          v_deg en [ -90,  90], positivo = arriba
+        que es exactamente (azimut, elevacion) de nuestro layout.
+        """
+        import py360convert
+        u = ((azimuth_deg + 180.0) % 360.0) - 180.0     # -> [-180, 180)
+        out = py360convert.e2p(pano_arr, fov_deg=fov_deg, u_deg=u, v_deg=elev_deg,
+                               out_hw=(out_side, out_side), mode="bilinear")
+        return Image.fromarray(np.clip(out, 0, 255).astype(np.uint8))
+
     def _direction(azimuth_deg, elev_deg):
         """azimut/elevacion (grados) -> vector unitario de direccion."""
         az, el = math.radians(azimuth_deg), math.radians(elev_deg)
@@ -897,9 +926,12 @@ def extract_multiview_from_panorama(slug, orig_filename, prof):
         world_up = np.array([0.0, 0.0, 1.0])
         if abs(float(np.dot(cam_dir, world_up))) > 0.999:
             world_up = np.array([0.0, 1.0, 0.0])
-        cam_right = np.cross(world_up, cam_dir)
+        # ORDEN DEL PRODUCTO VECTORIAL: cross(cam_dir, world_up), no al reves.
+        # cross(world_up, cam_dir) da el vector que apunta a la IZQUIERDA, con
+        # lo que la vista salia reflejada horizontalmente.
+        cam_right = np.cross(cam_dir, world_up)
         cam_right /= (np.linalg.norm(cam_right) + 1e-8)
-        cam_up = np.cross(cam_dir, cam_right)
+        cam_up = np.cross(cam_right, cam_dir)
 
         focal_px = (out_side / 2.0) / math.tan(math.radians(fov_deg) / 2.0)
         c = out_side / 2.0
@@ -917,8 +949,15 @@ def extract_multiview_from_panorama(slug, orig_filename, prof):
 
         az = np.arctan2(rw[..., 0], rw[..., 1])            # [-pi, pi]
         el = np.arcsin(np.clip(rw[..., 2], -1.0, 1.0))
+        # Equirectangular: columna 0 = azimut -180, columna W/2 = azimut 0.
         u = ((az / (2 * math.pi) + 0.5) % 1.0) * pano_w
-        v = (el / math.pi + 0.5) * pano_h
+        # FILA 0 = ARRIBA de la imagen = CENIT, por eso la elevacion RESTA.
+        # La formula anterior (el/pi + 0.5) mandaba el cenit a la ultima fila:
+        # cada vista salia invertida en vertical, con el cielo abajo. Junto al
+        # reflejo horizontal componia un giro de 180 grados por vista — algo que
+        # la reconstruccion casi absorbe (equivale a rodar la camara), pero que
+        # rompe apply_sky_mask, que busca el cielo en la parte de arriba.
+        v = (0.5 - el / math.pi) * pano_h
 
         # Bilineal: azimut envuelve (modulo), elevacion se recorta en los polos.
         x0 = np.floor(u).astype(np.int64)
@@ -938,11 +977,37 @@ def extract_multiview_from_panorama(slug, orig_filename, prof):
         return Image.fromarray(
             np.clip(top * (1 - fy) + bot * fy, 0, 255).astype(np.uint8))
 
+    # ── Eleccion del muestreador ──────────────────────────────────────
+    # Se prefiere py360convert (libreria dedicada y probada) sobre la
+    # implementacion propia. Pero la convencion de ejes es justo donde vivian
+    # los dos bugs de orientacion que tenia este codigo (reflejo horizontal y
+    # cielo abajo), asi que NO se acepta a ciegas: se compara una vista contra
+    # el muestreador interno ya verificado y solo se usa si coinciden.
+    sampler, sampler_name = _sample, "interno"
+    try:
+        az0, el0 = layout[0]
+        a = np.asarray(_sample_lib(az0, el0), dtype=np.float32)
+        b = np.asarray(_sample(az0, el0), dtype=np.float32)
+        diff = float(np.abs(a - b).mean())
+        if diff <= 2.0:          # niveles 0-255; <=2 es ruido de interpolacion
+            sampler, sampler_name = _sample_lib, "py360convert"
+            log.info("  [%s] multiview: py360convert validado (dif. media %.2f/255)" % (
+                slug, diff))
+        else:
+            log.warning("  [%s] multiview: py360convert discrepa del muestreador "
+                        "verificado (dif. media %.1f/255) — se usa el interno. "
+                        "Revisar convencion de ejes de la libreria." % (slug, diff))
+    except ImportError:
+        log.debug("  [%s] multiview: py360convert no instalado — muestreador interno" % slug)
+    except Exception as e:
+        log.warning("  [%s] multiview: py360convert fallo (%s) — muestreador interno" % (
+            slug, e))
+
     view_paths = []
     for i, (az, el) in enumerate(layout):
         view_path = view_path_for_slug(slug, base_name, i)
         try:
-            _sample(az, el).save(view_path, "PNG")
+            sampler(az, el).save(view_path, "PNG")
             view_paths.append(view_path)
             log.debug("  [%s] multiview: vista %02d (az=%.0f° el=%.0f°) -> %s" % (
                 slug, i, az, el, os.path.basename(view_path)))
@@ -950,8 +1015,8 @@ def extract_multiview_from_panorama(slug, orig_filename, prof):
             log.error("  [%s] multiview: vista %d FALLO: %s" % (slug, i, e))
             return None
 
-    log.info("  [%s] multiview: %d vistas extraidas (esfera completa)" % (
-        slug, len(view_paths)))
+    log.info("  [%s] multiview: %d vistas extraidas (esfera completa, %s)" % (
+        slug, len(view_paths), sampler_name))
     return view_paths
 
 
@@ -983,10 +1048,12 @@ def _stage_views(slug, view_paths):
 def _thin_views(view_paths, keep):
     """Reduce la lista de vistas a `keep` repartiendolas de forma UNIFORME.
 
-    Se usa en la recuperacion de OOM. Coger las N primeras arruinaria la
-    cobertura (dejaria fuera los anillos de techo/suelo, que van al final del
-    layout); un muestreo con paso constante conserva la esfera completa, solo
-    que mas espaciada.
+    ULTIMO RECURSO, solo cuando no se puede re-extraer del panorama (modo solo
+    frente, o panorama ausente). Adelgazar una lista de vistas NO conserva la
+    cobertura esferica: medido sobre el layout de 16 vistas, quedarse con 14
+    deja un 8% de la esfera sin cubrir, y con 11 un 17%. Cuando hay panorama,
+    run_ml re-extrae el layout completo del perfil degradado (`relayout`), que
+    si cubre; esta funcion es el plan B.
     """
     n = len(view_paths)
     if keep >= n or keep <= 0:
@@ -1001,7 +1068,8 @@ def _thin_views(view_paths, keep):
     return out
 
 
-def run_ml(slug, settings=None, want_mesh=True, prof=None, view_paths=None):
+def run_ml(slug, settings=None, want_mesh=True, prof=None, view_paths=None,
+           relayout=None):
     """Ejecuta WorldMirrorPipeline con las views extraidas.
     El output se guarda en projects/<slug>/output/."""
     views_dir = os.path.join(PROJECTS_DIR, slug, "views")
@@ -1076,8 +1144,8 @@ def run_ml(slug, settings=None, want_mesh=True, prof=None, view_paths=None):
     #  a) tambien se reduce el NUMERO DE VISTAS. La atencion cross-view de
     #     WorldMirror crece con N, asi que es la segunda palanca mas fuerte
     #     despues de la resolucion, y antes quedaba sin usar porque las vistas
-    #     ya estaban en disco. Se adelgaza con _thin_views para no perder la
-    #     cobertura esferica.
+    #     ya estaban en disco. Se RE-EXTRAE el layout del perfil degradado
+    #     (`relayout`), que vuelve a cubrir la esfera entera con menos vistas.
     #  b) se DESCARGA Y RECARGA el pipeline entre intentos. Tras un OOM el
     #     allocator de CUDA queda fragmentado y con estado sucio; reintentar
     #     sobre la misma instancia suele volver a fallar aunque el nuevo perfil
@@ -1108,8 +1176,22 @@ def run_ml(slug, settings=None, want_mesh=True, prof=None, view_paths=None):
             is_oom = _is_oom_error(e)
             nxt = downgrade_profile(attempt_prof) if (is_oom and attempt_prof and _HW_PROFILE_OK) else None
             if is_oom and nxt is not None:
-                # Adelgazar vistas al tope del nuevo perfil, conservando la esfera.
-                new_views = _thin_views(attempt_views, min(nxt.n_views, len(attempt_views) - 1))
+                # Re-extraer el layout COMPLETO del perfil degradado. Es la
+                # diferencia entre degradar y romper: adelgazar la lista de
+                # vistas anterior dejaria agujeros en la esfera (medido: 8% al
+                # pasar de 16 a 14 vistas), mientras que el layout del nuevo
+                # perfil cubre el 100% con menos vistas. Cuesta segundos de CPU.
+                new_views = None
+                if relayout is not None:
+                    try:
+                        new_views = relayout(nxt)
+                    except Exception as re_err:
+                        log.warning("  [%s] run_ml: relayout fallo (%s)" % (slug, re_err))
+                if not new_views:
+                    new_views = _thin_views(attempt_views,
+                                            min(nxt.n_views, len(attempt_views) - 1))
+                    log.warning("  [%s] run_ml: sin relayout — adelgazando vistas "
+                                "(la cobertura esferica se degrada)" % slug)
                 log.warning("  [%s] run_ml: OOM en perfil '%s' — bajando a '%s' "
                             "(%d -> %d vistas) y recargando pipeline" % (
                                 slug, tier, nxt.tier, len(attempt_views), len(new_views)))
@@ -1183,6 +1265,18 @@ def export_glb_from_ply(slug, glb_step=2, views_dir=None):
                     "(revisar staging de vistas)" % (
                         slug, len(depth_files), len(view_files), views_dir,
                         min(len(depth_files), len(view_files))))
+
+    # ── Via preferente: fusion TSDF con Open3D ────────────────────────
+    # Las vistas se solapan a proposito (~25 grados) para que no queden huecos,
+    # pero mallarlas por separado y concatenarlas duplica la geometria en cada
+    # solape: superficies dobles, z-fighting y un GLB mas pesado sin mas detalle.
+    # ScalableTSDFVolume integra todas las profundidades en UN campo de
+    # distancia y extrae una sola superficie. Es la implementacion de KinectFusion
+    # de Open3D, que ya es dependencia del proyecto.
+    fused = _export_glb_tsdf(slug, glb_path, depth_files, view_files, cam_data, glb_step)
+    if fused:
+        return fused
+    log.info("  [%s] glb: fusion TSDF no disponible — malla por vista" % slug)
 
     log.info("  [%s] glb: reconstruyendo malla desde %d depth map(s) (step=%d)..." % (
         slug, min(len(depth_files), len(view_files)), glb_step))
@@ -1310,6 +1404,129 @@ def export_glb_from_ply(slug, glb_step=2, views_dir=None):
     log.info("  [%s] glb: mesh.glb generado — %d verts | %d tris | %.2f MB" % (
         slug, len(vertices), len(faces), os.path.getsize(glb_path) / 1e6))
     return glb_path
+
+
+def _export_glb_tsdf(slug, glb_path, depth_files, view_files, cam_data, glb_step):
+    """Fusiona todos los depth maps en UNA malla con Open3D (TSDF).
+
+    Devuelve la ruta del GLB, o None si no se puede (Open3D ausente, datos
+    incompatibles o malla vacia) para que el caller use la via por vista.
+
+    Por que TSDF y no concatenar mallas por vista:
+      - la geometria de los solapes se promedia en vez de duplicarse: adios a
+        las superficies dobles y al z-fighting
+      - el ruido de profundidad entre vistas se cancela al integrarse
+      - sale una superficie unica y coherente, que es lo que un visor espera
+
+    voxel_length fija la densidad. Se deriva de la escala real de la escena para
+    no depender de que el mundo venga en metros: WorldMirror devuelve
+    profundidades en unidades arbitrarias segun la escena.
+    """
+    try:
+        import open3d as o3d
+        import numpy as np
+        import trimesh
+    except Exception as e:
+        log.debug("  [%s] glb/tsdf: dependencias no disponibles (%s)" % (slug, e))
+        return None
+
+    try:
+        from PIL import Image
+        pairs = list(zip(depth_files, view_files))
+        if not pairs:
+            return None
+
+        # Escala de la escena a partir de la mediana de profundidad de la
+        # primera vista: da un voxel proporcional a lo que se esta midiendo.
+        d0 = np.load(pairs[0][0])
+        if d0.ndim == 3:
+            d0 = d0[..., 0]
+        finite = d0[np.isfinite(d0) & (d0 > 0)]
+        if finite.size == 0:
+            return None
+        scale = float(np.median(finite))
+        # ~1/400 de la profundidad tipica: denso, coherente con "maxima densidad".
+        voxel = max(scale / 400.0, 1e-4)
+
+        volume = o3d.pipelines.integration.ScalableTSDFVolume(
+            voxel_length=voxel,
+            sdf_trunc=voxel * 5.0,
+            color_type=o3d.pipelines.integration.TSDFVolumeColorType.RGB8,
+        )
+
+        STEP = max(1, int(glb_step))
+        integrated = 0
+        for i, (depth_path, view_path) in enumerate(pairs):
+            depth = np.load(depth_path)
+            if depth.ndim == 3:
+                depth = depth[..., 0]
+            depth = np.ascontiguousarray(depth[::STEP, ::STEP].astype(np.float32))
+            H, W = depth.shape
+
+            img = np.array(Image.open(view_path).convert("RGB"))
+            if img.shape[:2] != (H, W):
+                img = np.array(Image.fromarray(img).resize((W, H), Image.BILINEAR))
+            img = np.ascontiguousarray(img.astype(np.uint8))
+
+            ci = min(i, len(cam_data["intrinsics"]) - 1)
+            intr = cam_data["intrinsics"][ci]["matrix"]
+            fx, fy = float(intr[0][0]) / STEP, float(intr[1][1]) / STEP
+            cx, cy = float(intr[0][2]) / STEP, float(intr[1][2]) / STEP
+
+            ei = min(i, len(cam_data["extrinsics"]) - 1)
+            # Open3D integra con la matriz world-to-camera, que es justo el
+            # formato en que WorldMirror guarda las extrinsecas.
+            extrinsic = np.array(cam_data["extrinsics"][ei]["matrix"], dtype=np.float64)
+            if extrinsic.shape == (3, 4):
+                extrinsic = np.vstack([extrinsic, [0.0, 0.0, 0.0, 1.0]])
+            if extrinsic.shape != (4, 4):
+                return None
+
+            rgbd = o3d.geometry.RGBDImage.create_from_color_and_depth(
+                o3d.geometry.Image(img),
+                o3d.geometry.Image(depth),
+                depth_scale=1.0,               # ya viene en unidades de la escena
+                depth_trunc=scale * 20.0,      # descarta profundidades disparatadas
+                convert_rgb_to_intensity=False,
+            )
+            volume.integrate(
+                rgbd,
+                o3d.camera.PinholeCameraIntrinsic(W, H, fx, fy, cx, cy),
+                extrinsic,
+            )
+            integrated += 1
+
+        if not integrated:
+            return None
+
+        mesh = volume.extract_triangle_mesh()
+        mesh.compute_vertex_normals()
+        verts = np.asarray(mesh.vertices)
+        faces = np.asarray(mesh.triangles)
+        if len(verts) == 0 or len(faces) == 0:
+            log.warning("  [%s] glb/tsdf: malla vacia — se usa la via por vista" % slug)
+            return None
+
+        colors = np.asarray(mesh.vertex_colors)
+        if len(colors) == len(verts):
+            rgba = np.concatenate([(colors * 255).astype(np.uint8),
+                                   np.full((len(verts), 1), 255, dtype=np.uint8)], axis=1)
+        else:
+            rgba = None
+
+        trimesh.Trimesh(vertices=verts, faces=faces,
+                        vertex_colors=rgba, process=False).export(glb_path)
+
+        if not os.path.exists(glb_path) or os.path.getsize(glb_path) == 0:
+            return None
+        log.info("  [%s] glb: TSDF fusionado — %d vistas | %d verts | %d tris | "
+                 "voxel=%.4f | %.2f MB" % (
+                     slug, integrated, len(verts), len(faces), voxel,
+                     os.path.getsize(glb_path) / 1e6))
+        return glb_path
+    except Exception as e:
+        log.warning("  [%s] glb/tsdf: fallo (%s) — se usa la via por vista" % (slug, e))
+        return None
 
 
 def _export_glb_pointcloud(slug, glb_path):
@@ -1852,9 +2069,12 @@ def process(rec):
     # ── Step 3: WorldMirror 2.0 sobre las vistas de ESTA corrida ──────
     set_json_fields(rid, stage="recon")
     output_dir = None
+    # Solo hay relayout si venimos del 360: re-extraer exige un panorama.
+    _relayout = ((lambda p: extract_multiview_from_panorama(slug, orig_filename, p))
+                 if (full_360 and len(view_paths) > 1) else None)
     try:
         output_dir = run_ml(slug, settings, want_mesh=True, prof=eff,
-                            view_paths=view_paths)
+                            view_paths=view_paths, relayout=_relayout)
     except Exception as e:
         log.error("  [%s] ML FALLO: %s\n%s" % (slug, e, traceback.format_exc()))
         set_status(rid, "error")
