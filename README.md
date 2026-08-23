@@ -53,31 +53,36 @@ el frontend pide algo:
 
 El modo se resuelve solo a partir de `.env`:
 
-- **Local** (por defecto): `.env` vacio o con `PB_URL=` vacia. Levanta un
-  PocketBase propio en `:8092`, con las colecciones y un usuario de desarrollo
-  creados automaticamente. La cuenta de servicio del worker se genera sola y
-  queda en `scripts/.env` (ignorado por git). El frontend lo indica con un
-  icono 💻 discreto al lado del titulo: es un estado esperado, todo se
-  procesa en tu maquina y no se sube a la web.
-- **Remoto**: si `PB_URL` apunta a un PocketBase alcanzable, preflight.ps1
-  te pide por consola el email y password del superuser, valida que
-  autentiquen y los guarda en `scripts/.env` (no en `.env`).
-- **Fallback automatico**: si `PB_URL` no responde a `/api/health`, o si
-  las credenciales remotas no autentican, se cae a modo local con un
-  warning claro. El proyecto nunca queda inutilizable por una config rota.
+- **Local** (por defecto): `PB_URL` vacia. Levanta un PocketBase propio en
+  `:8092` y crea ahi las colecciones y tu cuenta (la del `.env`). El frontend
+  lo indica con un icono 💻 discreto al lado del titulo: es un estado
+  esperado, todo se procesa en tu maquina y no se sube a la web.
+- **Remoto**: si `PB_URL` apunta a un PocketBase alcanzable, se usa esa
+  instancia tal cual. Las colecciones ya existen del otro lado; preflight solo
+  comprueba que tu cuenta pueda entrar y corta con un mensaje claro si no.
+- **Fallback automatico**: si `PB_URL` no responde a `/api/health` se cae a
+  modo local con un warning claro.
 
 ### Que hay en `.env`
 
-Solo tres variables, todas relacionadas a COMO te conectas al backend:
+Cinco variables y nada mas:
 
 ```
 PB_URL=
 PB_AUTH_COLLECTION=hyworld_user
 PB_DATA_COLLECTION=hyworld_data
+PB_USER_EMAIL=
+PB_USER_PASSWORD=
 ```
 
-Todo lo demas (rutas de datos, modelos, cache HF, cuenta de servicio del
-worker) se resuelve internamente y no se expone. No hace falta editar `.env`
+Las dos ultimas son tu cuenta: **la misma con la que entras en la web**. El
+worker entra con ella para bajarse las imagenes de los proyectos y subir el
+procesado — hace exactamente lo que podrias hacer vos desde el navegador, ni
+mas ni menos. No hay cuentas de servicio, ni superusers, ni tokens estaticos:
+nada se autogenera.
+
+Todo lo demas (rutas de datos, modelos, cache HF) se resuelve internamente y
+no se expone. No hace falta editar `.env`
 nunca para empezar — basta con un archivo vacio (o solo `PB_URL=`) y el
 arranque funciona.
 

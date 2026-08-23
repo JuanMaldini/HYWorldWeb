@@ -111,8 +111,10 @@ if not PB_URL:
               else "http://localhost:8092")
 
 PB_AUTH_COLLECTION = os.environ.get("PB_AUTH_COLLECTION", "hyworld_user").strip()
-PB_WORKER_EMAIL    = os.environ.get("PB_WORKER_EMAIL", "").strip()
-PB_WORKER_PASSWORD = os.environ.get("PB_WORKER_PASSWORD", "")
+# Cuenta de usuario del .env: la misma con la que se entra en la web. El worker
+# entra con ella para bajarse las imagenes y subir el procesado.
+PB_USER_EMAIL      = os.environ.get("PB_USER_EMAIL", "").strip()
+PB_USER_PASSWORD   = os.environ.get("PB_USER_PASSWORD", "")
 
 COLLECTION     = os.environ.get("PB_DATA_COLLECTION", "hyworld_data").strip()
 POLL_INTERVAL  = 10
@@ -364,7 +366,7 @@ def check_ml_env():
     log.info("Python   : %s  (%s)" % (platform.python_version(), sys.executable))
     log.info("Platform : %s %s" % (platform.system(), platform.release()))
     log.info("PB URL   : %s" % PB_URL)
-    log.info("PB cuenta: %s" % (PB_WORKER_EMAIL or "FALTA"))
+    log.info("PB cuenta: %s" % (PB_USER_EMAIL or "FALTA"))
     log.info("Projects : %s" % PROJECTS_DIR)
     log.info("Poll     : cada %ss" % POLL_INTERVAL)
     log.info("AllocConf: %s" % os.environ.get("PYTORCH_CUDA_ALLOC_CONF", "(default)"))
@@ -447,14 +449,14 @@ def pb_auth(force=False):
     global _pb_token, _pb_token_exp
     if not force and _pb_token and time.time() < _pb_token_exp - 300:
         return _pb_token
-    if not PB_WORKER_EMAIL or not PB_WORKER_PASSWORD:
+    if not PB_USER_EMAIL or not PB_USER_PASSWORD:
         raise RuntimeError(
-            "Falta la cuenta del worker de PocketBase "
-            "(PB_WORKER_EMAIL / PB_WORKER_PASSWORD)")
+            "Falta la cuenta de PocketBase en el .env "
+            "(PB_USER_EMAIL / PB_USER_PASSWORD)")
 
     url = "%s/api/collections/%s/auth-with-password" % (PB_URL, PB_AUTH_COLLECTION)
-    r = requests.post(url, json={"identity": PB_WORKER_EMAIL,
-                                 "password": PB_WORKER_PASSWORD}, timeout=30)
+    r = requests.post(url, json={"identity": PB_USER_EMAIL,
+                                 "password": PB_USER_PASSWORD}, timeout=30)
     if r.status_code != 200:
         raise RuntimeError("Auth PocketBase fallo (HTTP %d): %s"
                            % (r.status_code, r.text[:200]))
@@ -462,7 +464,7 @@ def pb_auth(force=False):
     if not _pb_token:
         raise RuntimeError("PocketBase no devolvio token")
     _pb_token_exp = _jwt_exp(_pb_token) or (time.time() + 3600)
-    log.info("  PocketBase: autenticado como %s" % PB_WORKER_EMAIL)
+    log.info("  PocketBase: autenticado como %s" % PB_USER_EMAIL)
     return _pb_token
 
 

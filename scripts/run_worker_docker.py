@@ -39,7 +39,7 @@ print("  HYWORLD_DIR   = %s" % os.environ["HYWORLD_DIR"])
 print("  PROJECTS_DIR  = %s" % os.environ["PROJECTS_DIR"])
 print("  LOGS_DIR      = %s" % os.environ["LOGS_DIR"])
 print("  PB_URL        = %s" % os.environ.get("PB_URL", "NO CONFIGURADO"))
-print("  PB_WORKER     = %s" % (os.environ.get("PB_WORKER_EMAIL") or "FALTA"))
+print("  PB_USER       = %s" % (os.environ.get("PB_USER_EMAIL") or "FALTA"))
 print()
 
 os.execv(sys.executable, [sys.executable, "-u", WORKER_PATH])

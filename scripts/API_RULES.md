@@ -50,9 +50,11 @@ proyecto) y `files` (file[] con la salida 3D).
 | `updateRule` | `@request.auth.id != ""` | Solo usuarios logueados tocan proyectos (el worker usa su propia cuenta de servicio, que cumple esta regla). |
 | `deleteRule` | `@request.auth.id != ""` | Idem para borrado. |
 
-El worker autentica como superuser (cuenta de servicio) y renueva su token
-solo — entra a la regla con `@request.auth.id != ""`. Eso evita darle al
-frontend un token admin estatico que pueda filtrarse.
+El worker entra con la MISMA cuenta de usuario que la web (`PB_USER_EMAIL` /
+`PB_USER_PASSWORD` del `.env`) y renueva su token solo — cumple la regla con
+`@request.auth.id != ""` igual que el frontend. No hay cuenta de servicio ni
+superuser: el worker no puede hacer nada que el usuario no pueda hacer desde
+la web.
 
 ---
 
@@ -87,6 +89,10 @@ intenta crear si no existen.
 ### Caso especial: panel `/admin`
 
 PocketBase sirve su panel admin en `PB_URL/_/`. Para entrar necesitás una
-cuenta de la coleccion `_superusers` (no de `hyworld_user`). En modo local,
-preflight la crea sola (`worker@hyworld.local`); en modo remoto es la que
-te pide al arranque.
+cuenta de la coleccion `_superusers` (no de `hyworld_user`). Esa cuenta NO
+esta en el `.env` ni la maneja el proyecto:
+
+- **Local**: preflight crea un superuser interno del contenedor (`admin@hyworld.local`)
+  solo para poder crear las colecciones por API. Es efimero y no se persiste.
+- **Remoto**: es la cuenta de admin de esa instancia, la que ya usás para
+  entrar al panel. El proyecto nunca la pide ni la guarda.

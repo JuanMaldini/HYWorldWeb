@@ -68,17 +68,16 @@ echo " Modo     : ${HYWORLD_MODE:-desconocido}"
 echo "============================================================"
 
 # ── Verificar configuracion de PocketBase ──────────────────
-# Ya no hay token estatico: el worker se autentica con una cuenta de
-# servicio (email+password) y renueva su token solo. preflight.ps1
-# garantiza que estas variables lleguen en ambos modos.
+# No hay token estatico ni cuenta de servicio: el worker entra con la cuenta
+# de usuario del .env (la misma de la web) y renueva su token solo.
 if [ -z "$PB_URL" ]; then
     echo "[HYWorld] ERROR: PB_URL no esta definido."
     echo "[HYWorld] Corre start.bat para regenerar la configuracion."
     tail -f /dev/null
 fi
-if [ -z "$PB_WORKER_EMAIL" ] || [ -z "$PB_WORKER_PASSWORD" ]; then
-    echo "[HYWorld] ERROR: falta la cuenta del worker (PB_WORKER_EMAIL/PASSWORD)."
-    echo "[HYWorld] start.bat las autogenera en scripts/.env."
+if [ -z "$PB_USER_EMAIL" ] || [ -z "$PB_USER_PASSWORD" ]; then
+    echo "[HYWorld] ERROR: falta la cuenta (PB_USER_EMAIL/PB_USER_PASSWORD)."
+    echo "[HYWorld] Ponelas en el .env del repo: son el email y la password de la web."
     tail -f /dev/null
 fi
 

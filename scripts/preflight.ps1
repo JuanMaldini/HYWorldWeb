@@ -7,10 +7,13 @@
  valida que el proyecto responda de verdad en localhost.
 
  Dos modos, resueltos solos a partir del .env del repo:
-   LOCAL  (.env vacio o incompleto) -> PocketBase propio en :8092,
-          colecciones y cuentas creadas automaticamente. No hace
-          falta tocar nada.
-   REMOTO (.env con PB_URL + cuenta de servicio) -> usa esa instancia.
+   LOCAL  (PB_URL vacio) -> PocketBase propio en :8092, con las
+          colecciones creadas automaticamente.
+   REMOTO (PB_URL apuntando a una instancia viva) -> usa esa.
+
+ En ambos modos el worker entra con la cuenta de usuario del .env
+ (PB_USER_EMAIL / PB_USER_PASSWORD), la misma de la web. No se
+ generan credenciales ni se crean cuentas de servicio.
 
  Todo el estado local vive en <repo>\.data
 ================================================================
@@ -35,11 +38,11 @@ $ComposeFile = Join-Path $ScriptDir 'docker-compose.yml'
 $LegacyData  = 'C:\HyWorldWebData'
 
 # ── Estado compartido entre fases ─────────────────────────────
-$script:LogFile = $null
-$script:DevMail = ''
-$script:DevPass = ''
-$script:WorkerMail = ''
-$script:WorkerPass = ''
+$script:LogFile  = $null
+$script:UserMail = ''
+$script:UserPass = ''
+# Superuser del PocketBase LOCAL. Solo existe para crear las colecciones
+# dentro del contenedor; se regenera en cada corrida y nunca toca el .env.
 $script:AdminMail = ''
 $script:AdminPass = ''
 function Write-Log {
@@ -66,13 +69,34 @@ function Fail {
     exit 1
 }
 
+function Invoke-Capture {
+    <# Corre un comando externo y devuelve @{ Ok; Out }.
+       OJO: en PS 5.1, con $ErrorActionPreference='Stop', redirigir el stderr de
+       un .exe envuelve cada linea en un NativeCommandError TERMINANTE, aunque el
+       comando haya salido con codigo 0. Por eso la preferencia se baja a
+       'Continue' aca adentro (es una variable local: no afecta al resto). #>
+    param([string]$File, [string[]]$Arguments)
+    $ErrorActionPreference = 'Continue'
+    try {
+        $out = @(& $File @Arguments 2>&1 | ForEach-Object { "$_" })
+        return [pscustomobject]@{ Ok = ($LASTEXITCODE -eq 0); Out = $out }
+    } catch {
+        return [pscustomobject]@{ Ok = $false; Out = @("$_") }
+    }
+}
+
+function Invoke-Quiet {
+    <# Igual que Invoke-Capture pero descarta la salida. $true si exit 0. #>
+    param([string]$File, [string[]]$Arguments)
+    return (Invoke-Capture $File $Arguments).Ok
+}
+
 function Invoke-Logged {
     <# Corre un comando externo mandando su salida al log. Devuelve $true si exit 0. #>
     param([string]$File, [string[]]$Arguments)
-    $out = & $File @Arguments 2>&1
-    $ok  = ($LASTEXITCODE -eq 0)
-    if ($script:LogFile -and $out) { Add-Content -Path $script:LogFile -Value $out -Encoding utf8 }
-    return $ok
+    $r = Invoke-Capture $File $Arguments
+    if ($script:LogFile -and $r.Out.Count) { Add-Content -Path $script:LogFile -Value $r.Out -Encoding utf8 }
+    return $r.Ok
 }
 
 # ── Manejo del .env (formato KEY=VALUE) ───────────────────────
@@ -126,9 +150,9 @@ function Wait-Until {
 
 function Get-ContainerHealth {
     param([string]$Name)
-    $s = (& docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' $Name 2>$null)
-    if ($LASTEXITCODE -ne 0) { return 'missing' }
-    return "$s".Trim()
+    $r = Invoke-Capture 'docker' @('inspect', '--format', '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}', $Name)
+    if (-not $r.Ok) { return 'missing' }
+    return ($r.Out -join '').Trim()
 }
 
 # =================================================================
@@ -168,8 +192,7 @@ function Initialize-Docker {
         $exe = Find-DockerDesktop
     }
 
-    & docker info *> $null
-    if ($LASTEXITCODE -eq 0) { Write-Log '  Docker: OK' 'OK'; return }
+    if (Invoke-Quiet 'docker' @('info')) { Write-Log '  Docker: OK' 'OK'; return }
 
     if (-not $exe) {
         Fail 'Docker no responde y no encuentro Docker Desktop.' 'Abrilo a mano y reintenta.'
@@ -177,7 +200,7 @@ function Initialize-Docker {
     Write-Log '  Docker esta apagado - abriendo Docker Desktop...' 'WARN'
     Start-Process -FilePath $exe | Out-Null
     Write-Log '  Esperando al daemon (hasta 3 min)...'
-    $up = Wait-Until { & docker info *> $null; $LASTEXITCODE -eq 0 } -TimeoutSec 180 -IntervalSec 5
+    $up = Wait-Until { Invoke-Quiet 'docker' @('info') } -TimeoutSec 180 -IntervalSec 5
     if (-not $up) {
         Fail 'Docker Desktop no termino de arrancar.' 'Abrilo a mano, espera a que diga "Engine running" y reintenta.'
     }
@@ -189,8 +212,9 @@ function Test-Prerequisites {
 
     Initialize-Docker
 
-    & docker compose version *> $null
-    if ($LASTEXITCODE -ne 0) { Fail 'No esta disponible "docker compose" (v2).' 'Actualizar Docker Desktop.' }
+    if (-not (Invoke-Quiet 'docker' @('compose', 'version'))) {
+        Fail 'No esta disponible "docker compose" (v2).' 'Actualizar Docker Desktop.'
+    }
 
     if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
         Fail 'git no esta instalado.' 'Instalar Git for Windows.'
@@ -204,7 +228,7 @@ function Test-Prerequisites {
 
     # GPU: aviso, no bloqueo (el contenedor valida de verdad al arrancar)
     if (Get-Command nvidia-smi -ErrorAction SilentlyContinue) {
-        $gpu = (& nvidia-smi --query-gpu=name --format=csv,noheader 2>$null | Select-Object -First 1)
+        $gpu = ((Invoke-Capture 'nvidia-smi' @('--query-gpu=name', '--format=csv,noheader')).Out | Select-Object -First 1)
         if ($gpu) { Write-Log "  GPU: $($gpu.Trim())" 'OK' }
     } else {
         Write-Log '  AVISO: nvidia-smi no encontrado - el worker puede no arrancar.' 'WARN'
@@ -361,20 +385,25 @@ function Write-ComposeEnv {
     # Arquitectura CUDA real (antes estaba fijo en 8.6 = RTX 30xx)
     $arch = '8.6'
     if (Get-Command nvidia-smi -ErrorAction SilentlyContinue) {
-        $cap = (& nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>$null | Select-Object -First 1)
+        $cap = ((Invoke-Capture 'nvidia-smi' @('--query-gpu=compute_cap', '--format=csv,noheader')).Out | Select-Object -First 1)
         if ($cap -and $cap.Trim() -match '^\d+\.\d+$') { $arch = $cap.Trim() }
     }
     Write-Log "  TORCH_CUDA_ARCH_LIST: $arch" 'OK'
 
-    # Cuenta del worker: vive en .env (PB_WORKER_EMAIL/PASSWORD).
-    # start.bat NO pregunta nada: si estan vacias se autogeneran y
-    # persisten en .env. El worker es un user comun de hyworld_user,
-    # nunca un _superusers.
-    $workerMail = 'worker@hyworld.local'
-    $workerPass = New-Secret 24
-    Write-Log '  Generando credenciales del worker...' 'OK'
-    $script:WorkerMail = $workerMail
-    $script:WorkerPass = $workerPass
+    # Cuenta de usuario: la escribe el usuario en el .env y se usa TAL CUAL.
+    # Preflight no genera passwords ni crea cuentas de servicio: es la misma
+    # cuenta con la que se entra en la web, asi el worker ve y escribe
+    # exactamente lo mismo que el frontend.
+    $userMail = ''; $userPass = ''
+    if ($script:Cfg.ContainsKey('PB_USER_EMAIL'))    { $userMail = $script:Cfg['PB_USER_EMAIL'].Trim() }
+    if ($script:Cfg.ContainsKey('PB_USER_PASSWORD')) { $userPass = $script:Cfg['PB_USER_PASSWORD'] }
+    if ([string]::IsNullOrWhiteSpace($userMail) -or [string]::IsNullOrWhiteSpace($userPass)) {
+        Fail 'Faltan PB_USER_EMAIL / PB_USER_PASSWORD en el .env del repo.' `
+             "Poner en $RootEnv el email y la password con los que entras en la web."
+    }
+    Write-Log "  Cuenta: $userMail (la del .env)" 'OK'
+    $script:UserMail = $userMail
+    $script:UserPass = $userPass
 
     $dataFwd   = $script:DataDir.Replace('\', '/')
     $modelsFwd = $script:ModelsDir.Replace('\', '/')
@@ -390,8 +419,8 @@ function Write-ComposeEnv {
         "PB_URL=$($script:PbUrlWorker)",
         "PB_AUTH_COLLECTION=$authColl",
         "PB_DATA_COLLECTION=$dataColl",
-        "PB_WORKER_EMAIL=$workerMail",
-        "PB_WORKER_PASSWORD=$workerPass"
+        "PB_USER_EMAIL=$userMail",
+        "PB_USER_PASSWORD=$userPass"
     )
     Set-Content -Path (Join-Path $ScriptDir '.env') -Value $lines -Encoding utf8
     Write-Log '  scripts/.env generado' 'OK'
@@ -414,10 +443,12 @@ function Build-Images {
     if (Test-Path $trigger) { $prev = (Get-Content $trigger -Raw).Trim() }
 
     $need = $Rebuild -or ($hash -ne $prev)
-    & docker image inspect hyworld_ml:latest *> $null
-    if ($LASTEXITCODE -ne 0) { $need = $true }
-    & docker image inspect hyworld_assets:latest *> $null
-    if ($LASTEXITCODE -ne 0) { $need = $true }
+    # 'docker images -q' no escribe en stderr ni devuelve != 0 si falta la imagen:
+    # sale vacio y listo. Mas barato que 'image inspect' para un simple existe/no.
+    foreach ($img in @('hyworld_ml:latest', 'hyworld_assets:latest')) {
+        $found = (Invoke-Capture 'docker' @('images', '-q', $img)).Out | Where-Object { $_.Trim() }
+        if (-not $found) { Write-Log "  Falta la imagen $img"; $need = $true }
+    }
 
     if (-not $need) { Write-Log '  Imagenes OK (sin cambios)' 'OK'; return }
 
@@ -445,6 +476,19 @@ function Start-Containers {
 
     Write-Log '  Bajando contenedores previos...'
     Invoke-Logged 'docker' (@('compose', '-f', $ComposeFile) + $profileArgs + @('down')) | Out-Null
+
+    # En REMOTO la cuenta ya existe del otro lado: solo se comprueba que entre.
+    # Fallar aca da un mensaje claro en vez de dejar al worker en bucle de
+    # "Failed to authenticate" (HTTP 400) sin que se vea el motivo.
+    if ($script:Mode -eq 'remote') {
+        Write-Log '  Probando la cuenta del .env contra PocketBase...'
+        if (Test-PbUserLogin $script:PbUrlHost) {
+            Write-Log "  Cuenta OK: $($script:UserMail)" 'OK'
+        } else {
+            Fail "$($script:UserMail) no puede entrar en $($script:PbUrlHost)." `
+                 "Revisar PB_USER_EMAIL / PB_USER_PASSWORD en $RootEnv - son los mismos con los que entras en la web."
+        }
+    }
 
     if ($script:Mode -eq 'local') {
         if (-not $script:AdminMail) { $script:AdminMail = 'admin@hyworld.local' }
@@ -486,6 +530,17 @@ function Start-Containers {
             Initialize-PocketBaseSchema
         }
     }
+}
+
+function Test-PbUserLogin {
+    <# $true si la cuenta del .env puede entrar contra $Base. #>
+    param([string]$Base)
+    try {
+        Invoke-RestMethod -Method Post -Uri "$Base/api/collections/$($script:AuthCollection)/auth-with-password" `
+            -ContentType 'application/json' -TimeoutSec 15 `
+            -Body (@{ identity = $script:UserMail; password = $script:UserPass } | ConvertTo-Json) | Out-Null
+        return $true
+    } catch { return $false }
 }
 
 function Initialize-PocketBaseSchema {
@@ -532,45 +587,24 @@ function Initialize-PocketBaseSchema {
         Write-Log "    $($script:DataCollection): creada" 'OK'
     } else { Write-Log "    $($script:DataCollection): ya existe" 'OK' }
 
-    $devMail = 'dev@hyworld.local'
-    $devPass = ''
-    if ($script:Cfg.ContainsKey('DEV_USER_PASSWORD')) { $devPass = $script:Cfg['DEV_USER_PASSWORD'] }
-    if ([string]::IsNullOrWhiteSpace($devPass)) { $devPass = New-Secret 16 }
+    # La cuenta del .env tiene que existir tambien en el PocketBase local, si
+    # no no hay con que entrar ni en la web ni en el worker. Se crea con la
+    # password del .env; si ya existe, se deja alineada con esa misma.
     try {
-        $body = @{ email = $devMail; password = $devPass; passwordConfirm = $devPass; verified = $true } | ConvertTo-Json
+        $body = @{ email = $script:UserMail; password = $script:UserPass; passwordConfirm = $script:UserPass; verified = $true } | ConvertTo-Json
         Invoke-RestMethod -Method Post -Uri "$base/api/collections/$($script:AuthCollection)/records" `
             -Headers $hdr -ContentType 'application/json' -Body $body | Out-Null
-        Write-Log "    usuario dev creado: $devMail" 'OK'
+        Write-Log "    usuario creado: $($script:UserMail)" 'OK'
     } catch {
         try {
-            $rec = Invoke-RestMethod -Uri "$base/api/collections/$($script:AuthCollection)/records?filter=(email='$devMail')" -Headers $hdr
+            $rec = Invoke-RestMethod -Uri "$base/api/collections/$($script:AuthCollection)/records?filter=(email='$($script:UserMail)')" -Headers $hdr
             if ($rec.items.Count -gt 0) {
-                $body = @{ password = $devPass; passwordConfirm = $devPass } | ConvertTo-Json
+                $body = @{ password = $script:UserPass; passwordConfirm = $script:UserPass } | ConvertTo-Json
                 Invoke-RestMethod -Method Patch -Uri "$base/api/collections/$($script:AuthCollection)/records/$($rec.items[0].id)" `
                     -Headers $hdr -ContentType 'application/json' -Body $body | Out-Null
+                Write-Log "    usuario ya existia: $($script:UserMail)" 'OK'
             }
-        } catch { Write-Log '    AVISO: no se pudo asegurar el usuario dev.' 'WARN' }
-    }
-    Set-EnvValue $RootEnv 'DEV_USER_EMAIL' $devMail
-    Set-EnvValue $RootEnv 'DEV_USER_PASSWORD' $devPass
-    $script:DevMail = $devMail
-    $script:DevPass = $devPass
-
-    try {
-        $body = @{ email = $script:WorkerMail; password = $script:WorkerPass; passwordConfirm = $script:WorkerPass; verified = $true } | ConvertTo-Json
-        Invoke-RestMethod -Method Post -Uri "$base/api/collections/$($script:AuthCollection)/records" `
-            -Headers $hdr -ContentType 'application/json' -Body $body | Out-Null
-        Write-Log "    usuario worker creado: $($script:WorkerMail)" 'OK'
-    } catch {
-        try {
-            $rec = Invoke-RestMethod -Uri "$base/api/collections/$($script:AuthCollection)/records?filter=(email='$($script:WorkerMail)')" -Headers $hdr
-            if ($rec.items.Count -gt 0) {
-                $body = @{ password = $script:WorkerPass; passwordConfirm = $script:WorkerPass } | ConvertTo-Json
-                Invoke-RestMethod -Method Patch -Uri "$base/api/collections/$($script:AuthCollection)/records/$($rec.items[0].id)" `
-                    -Headers $hdr -ContentType 'application/json' -Body $body | Out-Null
-                Write-Log "    usuario worker actualizado: $($script:WorkerMail)" 'OK'
-            }
-        } catch { Write-Log '    AVISO: no se pudo asegurar el usuario worker.' 'WARN' }
+        } catch { Write-Log "    AVISO: no se pudo asegurar $($script:UserMail) en el PocketBase local." 'WARN' }
     }
 }
 
@@ -624,8 +658,8 @@ function Test-Deployment {
         Add-Check 'Contenedor worker healthy' $ok (Get-ContainerHealth 'hyworld_ml')
 
         # 2. GPU visible DENTRO del contenedor
-        $gpu = (& docker exec hyworld_ml python3.11 -c "import torch;print(torch.cuda.get_device_name(0))" 2>&1 | Select-Object -Last 1)
-        Add-Check 'GPU dentro del worker' ($LASTEXITCODE -eq 0) "$gpu"
+        $r = Invoke-Capture 'docker' @('exec', 'hyworld_ml', 'python3.11', '-c', 'import torch;print(torch.cuda.get_device_name(0))')
+        Add-Check 'GPU dentro del worker' $r.Ok "$($r.Out | Select-Object -Last 1)"
 
         # 3. Asset server: on-demand, asi que solo verificamos que exista
         #    listo para arrancar. Lo enciende el worker al primer pedido.
@@ -633,13 +667,25 @@ function Test-Deployment {
         Add-Check 'Asset server preparado (on-demand)' ($st -ne 'missing') "estado: $st"
 
         # 3b. El worker puede hablar con Docker para encenderlo
-        & docker exec hyworld_ml python3.11 -c "import docker; docker.from_env().ping()" *> $null
-        Add-Check 'Worker puede encender el asset server' ($LASTEXITCODE -eq 0) 'socket de Docker'
+        $sock = Invoke-Quiet 'docker' @('exec', 'hyworld_ml', 'python3.11', '-c', 'import docker; docker.from_env().ping()')
+        Add-Check 'Worker puede encender el asset server' $sock 'socket de Docker'
 
         # 4. El worker se autentico contra PocketBase
-        $logs = (& docker logs --tail 200 hyworld_ml 2>&1) -join "`n"
-        $authOk = $logs -match 'autenticado como'
-        $detail = if ($authOk) { $script:WorkerMail } else { 'sin login en los logs del worker' }
+        # El login se loguea una sola vez por token, asi que con el worker
+        # ocupado se va del tail: si no aparece, se prueban las credenciales
+        # contra PocketBase para saber de que lado esta el problema.
+        $authOk = Wait-Until {
+            ((Invoke-Capture 'docker' @('logs', '--tail', '400', 'hyworld_ml')).Out -join "`n") -match 'autenticado como'
+        } -TimeoutSec 30 -IntervalSec 5
+        $detail = $script:UserMail
+        if (-not $authOk) {
+            if (Test-PbUserLogin $script:PbUrlHost) {
+                $authOk = $true
+                $detail = "$($script:UserMail) (cuenta OK; el login quedo fuera del tail)"
+            } else {
+                $detail = "$($script:UserMail) no puede entrar en $($script:PbUrlHost) - revisar PB_USER_PASSWORD en .env"
+            }
+        }
         Add-Check 'Worker autenticado en PocketBase' $authOk $detail
     }
 
@@ -703,10 +749,7 @@ if ($ok) {
     Write-Log '==========================================' 'OK'
     Write-Log "  Web        : http://localhost:5173"
     Write-Log "  PocketBase : $($script:PbUrlHost)"
-    if ($script:Mode -eq 'local' -and $script:DevMail) {
-        Write-Log "  Usuario dev: $($script:DevMail) / $($script:DevPass)"
-        Write-Log "               (guardado en $RootEnv)"
-    }
+    Write-Log "  Usuario    : $($script:UserMail)"
     if (-not $Web) {
         Write-Log "  Logs      : docker logs -f hyworld_ml  (start.bat lo engancha solo)"
     }
